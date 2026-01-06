@@ -10,7 +10,14 @@ use std::time::Duration;
 
 use axum::error_handling::HandleErrorLayer;
 use tokio::signal;
+use tokio::time::timeout;
 use tower::ServiceBuilder;
+
+/// Default timeout for blocking requests (5 minutes)
+const BLOCKING_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Poll interval when waiting for task completion in blocking mode
+const BLOCKING_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 use a2a_core::{
     error, errors, extract_task_id, now_iso8601, success, AgentCard, JsonRpcRequest,
@@ -19,11 +26,19 @@ use a2a_core::{
     PushNotificationConfigSetParams, StreamEvent, TaskCancelParams, TaskListParams,
     TaskQueryParams, TaskState, TaskStatusUpdateEvent, TaskSubscribeParams, PROTOCOL_VERSION,
 };
+
+/// Header name for A2A protocol version
+const A2A_VERSION_HEADER: &str = "A2A-Version";
+
+/// Supported major.minor version (patch versions are ignored per spec)
+const SUPPORTED_VERSION_MAJOR: u32 = 0;
+const SUPPORTED_VERSION_MINOR: u32 = 3;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::future::FutureExt;
 use futures::stream::Stream;
 use tokio::sync::broadcast;
 use tracing::info;
@@ -167,7 +182,8 @@ impl A2aServer {
 
         // SSE routes without timeout (long-lived connections)
         let sse_routes = Router::new()
-            .route("/v1/tasks/:task_id/subscribe", get(handle_task_subscribe_sse));
+            .route("/v1/tasks/:task_id/subscribe", get(handle_task_subscribe_sse))
+            .route("/v1/message/stream", post(handle_message_stream_sse));
 
         let mut router = timed_routes.merge(sse_routes);
 
@@ -296,6 +312,88 @@ impl AppState {
         // Ignore send errors (no receivers)
         let _ = self.event_tx.send(event);
     }
+}
+
+// ============ History Trimming ============
+
+/// Apply historyLength to a task's history
+///
+/// Per spec:
+/// - None/undefined: server default (include all history)
+/// - Some(0): exclude history entirely
+/// - Some(n): include last n messages
+fn apply_history_length(task: &mut a2a_core::Task, history_length: Option<u32>) {
+    match history_length {
+        Some(0) => {
+            // Exclude history entirely
+            task.history = None;
+        }
+        Some(n) => {
+            // Keep only last n messages
+            if let Some(ref mut history) = task.history {
+                let len = history.len();
+                if len > n as usize {
+                    *history = history.split_off(len - n as usize);
+                }
+            }
+        }
+        None => {
+            // Keep all history (server default)
+        }
+    }
+}
+
+// ============ Version Validation ============
+
+/// Check if the requested A2A version is supported
+///
+/// Returns Ok(()) if version is supported or not specified (defaults to current).
+/// Returns Err with error response if version is explicitly unsupported.
+fn validate_a2a_version(headers: &HeaderMap, req_id: &serde_json::Value) -> Result<(), (StatusCode, Json<JsonRpcResponse>)> {
+    if let Some(version_header) = headers.get(A2A_VERSION_HEADER) {
+        let version_str = version_header.to_str().unwrap_or("");
+
+        // Parse major.minor version (e.g., "0.3" or "0.3.0")
+        let parts: Vec<&str> = version_str.split('.').collect();
+        if parts.len() >= 2 {
+            if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                // Check if version is supported (exact major.minor match for now)
+                if major == SUPPORTED_VERSION_MAJOR && minor == SUPPORTED_VERSION_MINOR {
+                    return Ok(());
+                }
+
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(error(
+                        req_id.clone(),
+                        errors::VERSION_NOT_SUPPORTED,
+                        &format!(
+                            "Protocol version {}.{} not supported. Supported version: {}.{}",
+                            major, minor, SUPPORTED_VERSION_MAJOR, SUPPORTED_VERSION_MINOR
+                        ),
+                        Some(serde_json::json!({
+                            "requestedVersion": version_str,
+                            "supportedVersion": format!("{}.{}", SUPPORTED_VERSION_MAJOR, SUPPORTED_VERSION_MINOR)
+                        })),
+                    )),
+                ));
+            }
+        }
+
+        // Invalid version format
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                req_id.clone(),
+                errors::VERSION_NOT_SUPPORTED,
+                &format!("Invalid version format: {}. Expected major.minor (e.g., '0.3')", version_str),
+                None,
+            )),
+        ));
+    }
+
+    // No version header - use default (current version)
+    Ok(())
 }
 
 // ============ Error Response Helpers ============
@@ -429,6 +527,11 @@ async fn handle_rpc(
         return (StatusCode::BAD_REQUEST, Json(resp));
     }
 
+    // Validate A2A protocol version if specified
+    if let Err(err_response) = validate_a2a_version(&headers, &req.id) {
+        return err_response;
+    }
+
     // Extract auth context if extractor is configured
     let auth_context = state
         .auth_extractor
@@ -437,6 +540,7 @@ async fn handle_rpc(
 
     match req.method.as_str() {
         "message/send" => handle_message_send(state, req, auth_context).await,
+        "message/stream" => handle_message_stream_rpc(state, req).await,
         "tasks/get" => handle_tasks_get(state, req).await,
         "tasks/list" => handle_tasks_list(state, req).await,
         "tasks/cancel" => handle_tasks_cancel(state, req).await,
@@ -466,7 +570,7 @@ async fn handle_message_send(
     auth_context: Option<AuthContext>,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
     let req_id = req.id.clone();
-    
+
     let params: Result<MessageSendParams, _> =
         serde_json::from_value(req.params.clone().unwrap_or_default());
 
@@ -485,12 +589,86 @@ async fn handle_message_send(
         }
     };
 
+    // Extract configuration options
+    let blocking = params
+        .configuration
+        .as_ref()
+        .and_then(|c| c.blocking)
+        .unwrap_or(false);
+    let history_length = params
+        .configuration
+        .as_ref()
+        .and_then(|c| c.history_length);
+
     // Call the handler
     match state.handler.handle_message(params.message, auth_context).await {
-        Ok(task) => {
+        Ok(mut task) => {
             // Store the task and broadcast event
             state.task_store.insert(task.clone()).await;
             state.broadcast_event(StreamEvent::Task(task.clone()));
+
+            // If blocking mode, wait for task to reach terminal state
+            if blocking && !task.status.state.is_terminal() {
+                let task_id = task.id.clone();
+                let mut rx = state.subscribe_events();
+
+                let wait_result = timeout(BLOCKING_TIMEOUT, async {
+                    loop {
+                        tokio::select! {
+                            result = rx.recv() => {
+                                match result {
+                                    Ok(StreamEvent::Task(t)) if t.id == task_id => {
+                                        if t.status.state.is_terminal() {
+                                            return Some(t);
+                                        }
+                                    }
+                                    Ok(StreamEvent::TaskStatusUpdate(e)) if e.task_id == task_id => {
+                                        if e.status.state.is_terminal() {
+                                            // Fetch full task from store
+                                            if let Some(t) = state.task_store.get(&task_id).await {
+                                                return Some(t);
+                                            }
+                                        }
+                                    }
+                                    Err(broadcast::error::RecvError::Closed) => {
+                                        return None;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ = tokio::time::sleep(BLOCKING_POLL_INTERVAL) => {
+                                // Periodic check in case we missed an event
+                                if let Some(t) = state.task_store.get(&task_id).await {
+                                    if t.status.state.is_terminal() {
+                                        return Some(t);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                })
+                .await;
+
+                match wait_result {
+                    Ok(Some(final_task)) => task = final_task,
+                    Ok(None) => {
+                        // Channel closed, try to get latest state
+                        if let Some(t) = state.task_store.get(&task_id).await {
+                            task = t;
+                        }
+                    }
+                    Err(_) => {
+                        // Timeout - return current state with a note
+                        tracing::warn!("Blocking request timed out for task {}", task_id);
+                        if let Some(t) = state.task_store.get(&task_id).await {
+                            task = t;
+                        }
+                    }
+                }
+            }
+
+            // Apply history length trimming
+            apply_history_length(&mut task, history_length);
 
             match serde_json::to_value(task) {
                 Ok(val) => (StatusCode::OK, Json(success(req_id, val))),
@@ -513,7 +691,7 @@ async fn handle_message_send(
                 HandlerError::ProcessingFailed { .. } => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
                 HandlerError::Internal(_) => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
             };
-            
+
             (
                 status,
                 Json(error(
@@ -527,6 +705,145 @@ async fn handle_message_send(
     }
 }
 
+/// JSON-RPC handler for message/stream - returns SSE endpoint URL
+async fn handle_message_stream_rpc(
+    state: AppState,
+    req: JsonRpcRequest,
+) -> (StatusCode, Json<JsonRpcResponse>) {
+    // Check if streaming is supported
+    if !state.card.capabilities.streaming {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                req.id,
+                errors::UNSUPPORTED_OPERATION,
+                "streaming not supported by this agent",
+                None,
+            )),
+        );
+    }
+
+    // Return the streaming endpoint URL
+    let base_url = state.card.endpoint.trim_end_matches("/v1/rpc");
+    let stream_url = format!("{}/v1/message/stream", base_url);
+
+    (
+        StatusCode::OK,
+        Json(success(
+            req.id,
+            serde_json::json!({
+                "streamUrl": stream_url,
+                "protocol": "sse",
+                "method": "POST"
+            }),
+        )),
+    )
+}
+
+/// SSE endpoint for streaming message responses
+async fn handle_message_stream_sse(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(params): Json<MessageSendParams>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<JsonRpcResponse>)> {
+    // Check if streaming is supported
+    if !state.card.capabilities.streaming {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                serde_json::Value::Null,
+                errors::UNSUPPORTED_OPERATION,
+                "streaming not supported by this agent",
+                None,
+            )),
+        ));
+    }
+
+    // Extract auth context
+    let auth_context = state
+        .auth_extractor
+        .as_ref()
+        .and_then(|extractor| extractor(&headers));
+
+    // Call the handler to create initial task
+    let task = state
+        .handler
+        .handle_message(params.message, auth_context)
+        .await
+        .map_err(|e| {
+            let (code, status) = match &e {
+                HandlerError::InvalidInput(_) => (errors::INVALID_PARAMS, StatusCode::BAD_REQUEST),
+                HandlerError::AuthRequired(_) => (errors::INVALID_REQUEST, StatusCode::UNAUTHORIZED),
+                HandlerError::BackendUnavailable { .. } => (errors::INTERNAL_ERROR, StatusCode::SERVICE_UNAVAILABLE),
+                HandlerError::ProcessingFailed { .. } => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
+                HandlerError::Internal(_) => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
+            };
+            (status, Json(error(serde_json::Value::Null, code, &e.to_string(), None)))
+        })?;
+
+    // Store the task
+    let task_id = task.id.clone();
+    state.task_store.insert(task.clone()).await;
+    state.broadcast_event(StreamEvent::Task(task.clone()));
+
+    // Create SSE stream for this task
+    let mut rx = state.subscribe_events();
+    let task_store = state.task_store.clone();
+    let target_task_id = task_id;
+
+    let stream = async_stream::stream! {
+        // Send initial task state
+        let event = StreamEvent::Task(task);
+        if let Ok(json) = serde_json::to_string(&event) {
+            yield Ok(Event::default().data(json));
+        }
+
+        // Stream subsequent updates
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let matches = match &event {
+                        StreamEvent::Task(t) => t.id == target_task_id,
+                        StreamEvent::TaskStatusUpdate(e) => e.task_id == target_task_id,
+                        StreamEvent::TaskArtifactUpdate(e) => e.task_id == target_task_id,
+                        StreamEvent::Message(m) => {
+                            // Include messages from same context
+                            m.context_id.as_ref().map_or(false, |ctx| {
+                                task_store.get(&target_task_id).now_or_never()
+                                    .flatten()
+                                    .map_or(false, |t| t.context_id == *ctx)
+                            })
+                        }
+                        _ => false,
+                    };
+
+                    if matches {
+                        if let Ok(json) = serde_json::to_string(&event) {
+                            yield Ok(Event::default().data(json));
+                        }
+
+                        // Check if task reached terminal state
+                        if let StreamEvent::Task(t) = &event {
+                            if t.status.state.is_terminal() {
+                                break;
+                            }
+                        }
+                        if let StreamEvent::TaskStatusUpdate(e) = &event {
+                            if e.status.state.is_terminal() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 async fn handle_tasks_get(
     state: AppState,
     req: JsonRpcRequest,
@@ -537,18 +854,23 @@ async fn handle_tasks_get(
     match params {
         Ok(p) => {
             match state.task_store.get_flexible(&p.name).await {
-                Some(task) => match serde_json::to_value(task) {
-                    Ok(val) => (StatusCode::OK, Json(success(req.id, val))),
-                    Err(e) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(error(
-                            req.id,
-                            errors::INTERNAL_ERROR,
-                            "serialization failed",
-                            Some(serde_json::json!({"error": e.to_string()})),
-                        )),
-                    ),
-                },
+                Some(mut task) => {
+                    // Apply history length trimming
+                    apply_history_length(&mut task, p.history_length);
+
+                    match serde_json::to_value(task) {
+                        Ok(val) => (StatusCode::OK, Json(success(req.id, val))),
+                        Err(e) => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(error(
+                                req.id,
+                                errors::INTERNAL_ERROR,
+                                "serialization failed",
+                                Some(serde_json::json!({"error": e.to_string()})),
+                            )),
+                        ),
+                    }
+                }
                 None => (
                     StatusCode::NOT_FOUND,
                     Json(error(req.id, errors::TASK_NOT_FOUND, "task not found", None)),

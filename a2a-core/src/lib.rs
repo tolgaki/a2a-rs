@@ -222,14 +222,17 @@ pub struct AgentSkill {
 
 /// Message content part (text, file, or structured data)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "type", rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum Part {
     /// Plain text or markdown content
+    #[serde(rename = "text")]
     Text(TextPart),
     /// File reference or inline content
+    #[serde(rename = "file")]
     File(FilePart),
     /// Structured JSON data
+    #[serde(rename = "data")]
     Data(DataPart),
 }
 
@@ -243,13 +246,14 @@ pub struct TextPart {
 /// File content part per spec
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FilePart {
-    /// File URI or inline base64 content
+    /// File URL or reference
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub uri: Option<String>,
-    /// Base64-encoded file bytes (alternative to uri)
+    pub url: Option<String>,
+    /// Base64-encoded file bytes (alternative to url)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<String>,
     /// MIME type (e.g., "image/png", "application/pdf")
+    #[serde(rename = "mimeType")]
     pub media_type: String,
     /// Optional file name
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -640,16 +644,20 @@ pub struct PushNotificationConfigDeleteParams {
 
 /// Event types for streaming responses
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "event_type", rename_all = "snake_case")]
+#[serde(tag = "eventType", rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum StreamEvent {
     /// Task state or status update
+    #[serde(rename = "taskStatusUpdate")]
     TaskStatusUpdate(TaskStatusUpdateEvent),
     /// New or updated artifact
+    #[serde(rename = "taskArtifactUpdate")]
     TaskArtifactUpdate(TaskArtifactUpdateEvent),
     /// Complete task snapshot
+    #[serde(rename = "task")]
     Task(Task),
     /// Direct message response
+    #[serde(rename = "message")]
     Message(Message),
 }
 
@@ -874,9 +882,9 @@ mod tests {
     }
 
     #[test]
-    fn file_part_with_uri() {
+    fn file_part_with_url() {
         let part = Part::File(FilePart {
-            uri: Some("https://example.com/file.pdf".to_string()),
+            url: Some("https://example.com/file.pdf".to_string()),
             bytes: None,
             media_type: "application/pdf".to_string(),
             name: Some("document.pdf".to_string()),
@@ -887,7 +895,7 @@ mod tests {
 
         if let Part::File(fp) = parsed {
             assert_eq!(fp.media_type, "application/pdf");
-            assert_eq!(fp.uri, Some("https://example.com/file.pdf".to_string()));
+            assert_eq!(fp.url, Some("https://example.com/file.pdf".to_string()));
         } else {
             panic!("Expected FilePart");
         }
