@@ -1,0 +1,25 @@
+[package]
+name = "a2a-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "A2A 0.3.0 client library for agent communication"
+
+[lib]
+name = "a2a_client"
+path = "src/lib.rs"
+
+[dependencies]
+a2a-core = { path = "../a2a-core" }
+anyhow.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+urlencoding = "2"
