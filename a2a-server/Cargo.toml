@@ -1,5 +1,5 @@
 [package]
-name = "a2a-server"
+name = "a2a-rs-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,11 +12,11 @@ keywords = ["a2a", "agent", "json-rpc", "server"]
 categories = ["web-programming", "network-programming"]
 
 [lib]
-name = "a2a_server"
+name = "a2a_rs_server"
 path = "src/lib.rs"
 
 [dependencies]
-a2a-core = { version = "1.0.0", path = "../a2a-core" }
+a2a-rs-core = { version = "1.0.0", path = "../a2a-core" }
 anyhow.workspace = true
 axum.workspace = true
 reqwest.workspace = true

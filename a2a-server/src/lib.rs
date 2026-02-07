@@ -6,8 +6,8 @@
 //! # Generic Server Example
 //!
 //! ```rust,ignore
-//! use a2a_server::{A2aServer, MessageHandler, HandlerResult, AuthContext, EchoHandler};
-//! use a2a_core::{AgentCard, Message, Task};
+//! use a2a_rs_server::{A2aServer, MessageHandler, HandlerResult, AuthContext, EchoHandler};
+//! use a2a_rs_core::{AgentCard, Message, Task};
 //! use async_trait::async_trait;
 //!
 //! // Use the built-in echo handler for demos

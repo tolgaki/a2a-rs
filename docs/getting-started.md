@@ -9,12 +9,12 @@ Add the crates to your `Cargo.toml`:
 ```toml
 [dependencies]
 # For building agent servers
-a2a-server = "1.0"
-a2a-core = "1.0"
+a2a-rs-server = "1.0"
+a2a-rs-core = "1.0"
 
 # For building clients
-a2a-client = "1.0"
-a2a-core = "1.0"
+a2a-rs-client = "1.0"
+a2a-rs-core = "1.0"
 
 # Required
 tokio = { version = "1", features = ["full"] }
@@ -29,7 +29,7 @@ async-trait = "0.1"  # Only needed for custom handlers
 The simplest way to get started is with the built-in `EchoHandler`:
 
 ```rust
-use a2a_server::A2aServer;
+use a2a_rs_server::A2aServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -77,8 +77,8 @@ curl -X POST http://127.0.0.1:8080/v1/rpc \
 Create your own agent by implementing `MessageHandler`:
 
 ```rust
-use a2a_server::{A2aServer, MessageHandler, HandlerResult, AuthContext};
-use a2a_core::{
+use a2a_rs_server::{A2aServer, MessageHandler, HandlerResult, AuthContext};
+use a2a_rs_core::{
     AgentCard, AgentInterface, AgentProvider, AgentSkill,
     Message, SendMessageResponse, Part, Role, PROTOCOL_VERSION,
     completed_task_with_text,
@@ -147,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
 Protect your agent with authentication:
 
 ```rust
-use a2a_server::{A2aServer, AuthContext, HandlerError};
+use a2a_rs_server::{A2aServer, AuthContext, HandlerError};
 use axum::http::HeaderMap;
 
 // Server with auth extractor
@@ -197,7 +197,7 @@ async fn handle_message(
 ### 1. Discover an Agent
 
 ```rust
-use a2a_client::A2aClient;
+use a2a_rs_client::A2aClient;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -225,8 +225,8 @@ async fn main() -> anyhow::Result<()> {
 ### 2. Send a Message
 
 ```rust
-use a2a_client::A2aClient;
-use a2a_core::{Message, Part, Role, SendMessageResponse};
+use a2a_rs_client::A2aClient;
+use a2a_rs_core::{Message, Part, Role, SendMessageResponse};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -277,8 +277,8 @@ async fn main() -> anyhow::Result<()> {
 For agents that process asynchronously:
 
 ```rust
-use a2a_client::{A2aClient, ClientConfig};
-use a2a_core::{Message, Part, Role, SendMessageResponse, TaskState};
+use a2a_rs_client::{A2aClient, ClientConfig};
+use a2a_rs_core::{Message, Part, Role, SendMessageResponse, TaskState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -325,7 +325,7 @@ async fn main() -> anyhow::Result<()> {
 ### 4. Using OAuth Authentication
 
 ```rust
-use a2a_client::{A2aClient, ClientConfig, OAuthConfig};
+use a2a_rs_client::{A2aClient, ClientConfig, OAuthConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -351,8 +351,8 @@ async fn main() -> anyhow::Result<()> {
     println!("Obtained session token!");
 
     // Now use the token for requests
-    let message = a2a_core::new_message(
-        a2a_core::Role::User,
+    let message = a2a_rs_core::new_message(
+        a2a_rs_core::Role::User,
         "Hello with auth!",
         None,
     );
@@ -371,7 +371,7 @@ async fn main() -> anyhow::Result<()> {
 ### Creating Messages
 
 ```rust
-use a2a_core::{Message, Part, Role, new_message};
+use a2a_rs_core::{Message, Part, Role, new_message};
 
 // Simple text message using helper
 let simple_msg = new_message(Role::User, "Hello, world!", None);
@@ -408,7 +408,7 @@ let complex_msg = Message {
 ### Multimodal Messages
 
 ```rust
-use a2a_core::{Message, Part, Role};
+use a2a_rs_core::{Message, Part, Role};
 
 // Message with URL reference
 let file_msg = Message {
@@ -448,8 +448,8 @@ let image_msg = Message {
 ### Error Handling in Handlers
 
 ```rust
-use a2a_server::{HandlerError, HandlerResult};
-use a2a_core::{Message, Part, SendMessageResponse, completed_task_with_text};
+use a2a_rs_server::{HandlerError, HandlerResult};
+use a2a_rs_core::{Message, Part, SendMessageResponse, completed_task_with_text};
 
 async fn handle_message(
     message: Message,
@@ -483,7 +483,7 @@ async fn handle_message(
 ### Conversation Context
 
 ```rust
-use a2a_core::{Message, Part, Role};
+use a2a_rs_core::{Message, Part, Role};
 use uuid::Uuid;
 
 // Start a new conversation
@@ -523,7 +523,7 @@ let msg2 = Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use a2a_core::{Role, TaskState, SendMessageResponse, new_message};
+    use a2a_rs_core::{Role, TaskState, SendMessageResponse, new_message};
 
     #[tokio::test]
     async fn test_greeting_handler() {
@@ -551,7 +551,7 @@ mod tests {
 ### Integration Testing with the Router
 
 ```rust
-use a2a_server::A2aServer;
+use a2a_rs_server::A2aServer;
 use axum::{body::Body, http::{Request, StatusCode}};
 use http_body_util::BodyExt;
 use tower::ServiceExt;

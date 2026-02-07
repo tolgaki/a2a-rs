@@ -23,9 +23,9 @@ cargo build
 cargo test
 
 # Run tests for a specific crate
-cargo test -p a2a-core
-cargo test -p a2a-server
-cargo test -p a2a-client
+cargo test -p a2a-rs-core
+cargo test -p a2a-rs-server
+cargo test -p a2a-rs-client
 ```
 
 ## Making Changes
@@ -97,10 +97,10 @@ git commit -m "docs(readme): update installation instructions"
 
 ```
 a2a-rs/
-├── a2a-core/           # Shared types and utilities
+├── a2a-rs-core/           # Shared types and utilities
 │   └── src/
 │       └── lib.rs      # All type definitions
-├── a2a-server/         # Server framework
+├── a2a-rs-server/         # Server framework
 │   ├── src/
 │   │   ├── lib.rs      # Re-exports
 │   │   ├── handler.rs  # MessageHandler trait
@@ -110,7 +110,7 @@ a2a-rs/
 │   │   └── webhook_store.rs
 │   └── tests/
 │       └── integration_tests.rs
-├── a2a-client/         # Client library
+├── a2a-rs-client/         # Client library
 │   └── src/
 │       ├── lib.rs      # Re-exports
 │       └── client.rs   # A2aClient implementation

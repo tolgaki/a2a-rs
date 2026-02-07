@@ -2,8 +2,8 @@
 //!
 //! Tests the JSON-RPC endpoints end-to-end.
 
-use a2a_core::{JsonRpcResponse, Message, Part, Role, SendMessageResponse, TaskState};
-use a2a_server::A2aServer;
+use a2a_rs_core::{JsonRpcResponse, Message, Part, Role, SendMessageResponse, TaskState};
+use a2a_rs_server::A2aServer;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -51,7 +51,7 @@ fn test_message(id: &str, text: &str) -> Message {
 }
 
 /// Helper to extract Task from SendMessageResponse JSON
-fn extract_task(result: serde_json::Value) -> a2a_core::Task {
+fn extract_task(result: serde_json::Value) -> a2a_rs_core::Task {
     let resp: SendMessageResponse = serde_json::from_value(result).unwrap();
     match resp {
         SendMessageResponse::Task(t) => t,
@@ -111,7 +111,7 @@ async fn test_message_send_and_poll() {
 
     let rpc_response = response_json(response).await;
     assert!(rpc_response.error.is_none());
-    let polled_task: a2a_core::Task = serde_json::from_value(rpc_response.result.unwrap()).unwrap();
+    let polled_task: a2a_rs_core::Task = serde_json::from_value(rpc_response.result.unwrap()).unwrap();
     assert_eq!(polled_task.id, task_id);
 }
 
@@ -160,7 +160,7 @@ async fn test_agent_card_endpoint() {
 
     let body = response.into_body();
     let bytes = body.collect().await.unwrap().to_bytes();
-    let card: a2a_core::AgentCard = serde_json::from_slice(&bytes).unwrap();
+    let card: a2a_rs_core::AgentCard = serde_json::from_slice(&bytes).unwrap();
 
     assert_eq!(card.name, "Echo Agent");
     assert!(card.endpoint().unwrap().contains("/v1/rpc"));

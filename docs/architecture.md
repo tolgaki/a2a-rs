@@ -11,7 +11,7 @@ This document describes the architecture of the A2A Rust libraries.
                     |                           |
                     v                           v
 +-----------------------------+   +-----------------------------+
-|        a2a-client           |   |        a2a-server           |
+|        a2a-rs-client           |   |        a2a-rs-server           |
 |  - Agent discovery          |   |  - MessageHandler trait     |
 |  - Message sending          |   |  - A2aServer builder        |
 |  - Task polling             |   |  - TaskStore                |
@@ -21,7 +21,7 @@ This document describes the architecture of the A2A Rust libraries.
                     +-------------+-------------+
                                   v
                     +-----------------------------+
-                    |         a2a-core            |
+                    |         a2a-rs-core            |
                     |  - A2A RC 1.0 types         |
                     |  - Security schemes         |
                     |  - JSON-RPC definitions     |
@@ -31,7 +31,7 @@ This document describes the architecture of the A2A Rust libraries.
 
 ## Crates
 
-### a2a-core
+### a2a-rs-core
 
 **Purpose**: Shared types and definitions for the A2A RC 1.0 specification.
 
@@ -63,13 +63,13 @@ This document describes the architecture of the A2A Rust libraries.
 
 **Files**:
 ```
-a2a-core/src/
+a2a-rs-core/src/
 └── lib.rs          # All type definitions and helpers
 ```
 
 ---
 
-### a2a-server
+### a2a-rs-server
 
 **Purpose**: Generic server framework for building A2A agents.
 
@@ -88,8 +88,8 @@ a2a-core/src/
 **MessageHandler Trait**:
 
 ```rust
-use a2a_server::{MessageHandler, HandlerResult, AuthContext};
-use a2a_core::{AgentCard, Message, SendMessageResponse};
+use a2a_rs_server::{MessageHandler, HandlerResult, AuthContext};
+use a2a_rs_core::{AgentCard, Message, SendMessageResponse};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -119,7 +119,7 @@ pub trait MessageHandler: Send + Sync {
 **A2aServer Builder**:
 
 ```rust
-use a2a_server::{A2aServer, AuthContext};
+use a2a_rs_server::{A2aServer, AuthContext};
 
 // Minimal server with echo handler
 A2aServer::echo()
@@ -156,7 +156,7 @@ A2aServer::new(my_handler)
 
 **Files**:
 ```
-a2a-server/src/
+a2a-rs-server/src/
 ├── lib.rs              # Re-exports
 ├── handler.rs          # MessageHandler trait, AuthContext, EchoHandler
 ├── server.rs           # A2aServer builder and HTTP routing
@@ -175,7 +175,7 @@ a2a-server/src/
 
 ---
 
-### a2a-client
+### a2a-rs-client
 
 **Purpose**: Client library for interacting with A2A agents.
 
@@ -193,7 +193,7 @@ a2a-server/src/
 
 **Files**:
 ```
-a2a-client/src/
+a2a-rs-client/src/
 ├── lib.rs          # Re-exports
 └── client.rs       # A2aClient implementation
 ```
@@ -301,7 +301,7 @@ All components are designed for concurrent access:
 
 ## Dependencies
 
-| Crate | a2a-core | a2a-client | a2a-server |
+| Crate | a2a-rs-core | a2a-rs-client | a2a-rs-server |
 |-------|:--------:|:----------:|:----------:|
 | serde | x | x | x |
 | serde_json | x | x | x |

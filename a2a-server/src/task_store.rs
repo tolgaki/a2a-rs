@@ -2,7 +2,7 @@
 //!
 //! Provides thread-safe storage for A2A tasks.
 
-use a2a_core::{Task, ListTasksRequest, TaskListResponse};
+use a2a_rs_core::{Task, ListTasksRequest, TaskListResponse};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -234,7 +234,7 @@ impl TaskStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use a2a_core::{TaskState, TaskStatus};
+    use a2a_rs_core::{TaskState, TaskStatus};
 
     fn make_task(id: &str) -> Task {
         Task {

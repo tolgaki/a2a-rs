@@ -2,7 +2,7 @@
 //!
 //! Provides thread-safe storage for push notification webhook configurations.
 
-use a2a_core::PushNotificationConfig;
+use a2a_rs_core::PushNotificationConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

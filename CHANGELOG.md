@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 This is a major release aligning all types with the **A2A RC 1.0 proto spec**.
 
-#### a2a-core
+#### a2a-rs-core
 - **Breaking**: `PROTOCOL_VERSION` updated from `"0.3.0"` to `"1.0"`
 - **Breaking**: `AgentCard` — `description` is now required `String` (was `Option<String>`)
 - **Breaking**: `AgentCard` — removed `endpoint`, `url`, `preferred_transport`, `additional_interfaces` fields. Endpoints are now in `supported_interfaces: Vec<AgentInterface>`
@@ -52,13 +52,13 @@ This is a major release aligning all types with the **A2A RC 1.0 proto spec**.
 - Added error code `EXTENSION_SUPPORT_REQUIRED` (-32009)
 - Added `AgentExtension.params` field
 
-#### a2a-server
+#### a2a-rs-server
 - Updated all handlers for RC 1.0 type changes
 - `MessageHandler::handle_message` now returns `HandlerResult<SendMessageResponse>` (was `HandlerResult<Task>`)
 - Updated `EchoHandler` for new `AgentCard`, `AgentProvider`, `AgentInterface`, `AgentSkill` types
 - Updated all JSON-RPC method handlers for renamed request types and direct ID fields
 
-#### a2a-client
+#### a2a-rs-client
 - Updated `send_message` to use `SendMessageRequest` (was `MessageSendParams`)
 - Updated `poll_task` to use `GetTaskRequest` with direct `id` field (was `TaskQueryParams` with `name`)
 - Updated endpoint resolution for new `AgentInterface.protocol_binding` field
@@ -69,9 +69,9 @@ This is a major release aligning all types with the **A2A RC 1.0 proto spec**.
 
 ### Added
 - Initial release with A2A 0.3.0 specification support
-- `a2a-core`: Complete type definitions, JSON-RPC types, helper functions
-- `a2a-server`: `MessageHandler` trait, `A2aServer` builder, `TaskStore`, `EchoHandler`
-- `a2a-client`: `A2aClient` with agent card caching, polling, OAuth PKCE support
+- `a2a-rs-core`: Complete type definitions, JSON-RPC types, helper functions
+- `a2a-rs-server`: `MessageHandler` trait, `A2aServer` builder, `TaskStore`, `EchoHandler`
+- `a2a-rs-client`: `A2aClient` with agent card caching, polling, OAuth PKCE support
 
 ---
 

@@ -19,9 +19,9 @@ The **Agent-to-Agent (A2A) protocol** is an open standard for machine-to-machine
 
 | Crate | Description |
 |-------|-------------|
-| [`a2a-core`](a2a-core/) | Shared A2A RC 1.0 types, JSON-RPC definitions, and utilities |
-| [`a2a-server`](a2a-server/) | Generic server framework with pluggable `MessageHandler` trait |
-| [`a2a-client`](a2a-client/) | Client library for agent discovery and message sending |
+| [`a2a-rs-core`](a2a-rs-core/) | Shared A2A RC 1.0 types, JSON-RPC definitions, and utilities |
+| [`a2a-rs-server`](a2a-rs-server/) | Generic server framework with pluggable `MessageHandler` trait |
+| [`a2a-rs-client`](a2a-rs-client/) | Client library for agent discovery and message sending |
 
 ## Quick Start
 
@@ -32,12 +32,12 @@ Add the crates you need to your `Cargo.toml`:
 ```toml
 [dependencies]
 # For building agent servers
-a2a-server = "1.0"
-a2a-core = "1.0"
+a2a-rs-server = "1.0"
+a2a-rs-core = "1.0"
 
 # For building clients
-a2a-client = "1.0"
-a2a-core = "1.0"
+a2a-rs-client = "1.0"
+a2a-rs-core = "1.0"
 
 # Required async runtime
 tokio = { version = "1", features = ["full"] }
@@ -46,7 +46,7 @@ tokio = { version = "1", features = ["full"] }
 ### Build an Echo Server (5 lines)
 
 ```rust
-use a2a_server::A2aServer;
+use a2a_rs_server::A2aServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -59,8 +59,8 @@ async fn main() -> anyhow::Result<()> {
 Implement the `MessageHandler` trait to create your own AI agent:
 
 ```rust
-use a2a_server::{A2aServer, MessageHandler, HandlerResult, AuthContext};
-use a2a_core::{
+use a2a_rs_server::{A2aServer, MessageHandler, HandlerResult, AuthContext};
+use a2a_rs_core::{
     AgentCard, AgentCapabilities, AgentInterface, AgentProvider, AgentSkill,
     Message, SendMessageResponse, Part, Role, PROTOCOL_VERSION,
     completed_task_with_text,
@@ -127,8 +127,8 @@ async fn main() -> anyhow::Result<()> {
 ### Build a Client
 
 ```rust
-use a2a_client::A2aClient;
-use a2a_core::{Message, Part, Role, SendMessageResponse};
+use a2a_rs_client::A2aClient;
+use a2a_rs_core::{Message, Part, Role, SendMessageResponse};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -187,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
                     |                           |
                     v                           v
 +-----------------------------+   +-----------------------------+
-|        a2a-client           |   |        a2a-server           |
+|        a2a-rs-client           |   |        a2a-rs-server           |
 |  - Agent discovery          |   |  - MessageHandler trait     |
 |  - Message sending          |   |  - A2aServer builder        |
 |  - Task polling             |   |  - TaskStore                |
@@ -197,7 +197,7 @@ async fn main() -> anyhow::Result<()> {
                     +-------------+-------------+
                                   v
                     +-----------------------------+
-                    |         a2a-core            |
+                    |         a2a-rs-core            |
                     |  - A2A RC 1.0 types         |
                     |  - Security schemes         |
                     |  - JSON-RPC definitions     |
@@ -212,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
 Every A2A agent publishes an **Agent Card** that describes its capabilities:
 
 ```rust
-use a2a_core::{AgentCard, AgentInterface, AgentCapabilities, PROTOCOL_VERSION};
+use a2a_rs_core::{AgentCard, AgentInterface, AgentCapabilities, PROTOCOL_VERSION};
 
 // Agents expose their card at /.well-known/agent-card.json
 let card = AgentCard {
@@ -234,7 +234,7 @@ let card = AgentCard {
 Messages contain multimodal content via flat **Part** structs:
 
 ```rust
-use a2a_core::{Message, Part, Role};
+use a2a_rs_core::{Message, Part, Role};
 
 // Text message
 let msg = Message {
@@ -266,7 +266,7 @@ let raw_part = Part::raw("iVBORw0KGgoAAAANS...", "image/png");
 Tasks track the lifecycle of agent operations:
 
 ```rust
-use a2a_core::{Task, TaskState, TaskStatus};
+use a2a_rs_core::{Task, TaskState, TaskStatus};
 
 // Task states follow this lifecycle:
 //
@@ -288,7 +288,7 @@ if task.status.state.is_terminal() {
 Add authentication to your server:
 
 ```rust
-use a2a_server::{A2aServer, AuthContext};
+use a2a_rs_server::{A2aServer, AuthContext};
 use axum::http::HeaderMap;
 
 A2aServer::new(my_handler)
@@ -312,7 +312,7 @@ A2aServer::new(my_handler)
 Add additional HTTP endpoints:
 
 ```rust
-use a2a_server::{A2aServer, AppState};
+use a2a_rs_server::{A2aServer, AppState};
 use axum::{Router, routing::get, Json};
 
 async fn custom_health() -> Json<serde_json::Value> {
@@ -346,7 +346,7 @@ let card = client.fetch_agent_card().await?;         // Fetches fresh
 ### Configurable Polling
 
 ```rust
-use a2a_client::{A2aClient, ClientConfig};
+use a2a_rs_client::{A2aClient, ClientConfig};
 
 let config = ClientConfig {
     server_url: "http://localhost:8080".to_string(),
@@ -362,7 +362,7 @@ let task = client.poll_until_complete("task-id", None).await?;
 ### OAuth PKCE Support
 
 ```rust
-use a2a_client::{A2aClient, ClientConfig, OAuthConfig};
+use a2a_rs_client::{A2aClient, ClientConfig, OAuthConfig};
 
 let config = ClientConfig {
     server_url: "http://localhost:8080".to_string(),
@@ -434,7 +434,7 @@ curl -X POST http://localhost:8080/v1/rpc \
 ### JSON-RPC Error Codes
 
 ```rust
-use a2a_core::errors;
+use a2a_rs_core::errors;
 
 // Standard JSON-RPC errors
 errors::PARSE_ERROR;        // -32700
@@ -456,7 +456,7 @@ errors::EXTENSION_SUPPORT_REQUIRED;     // -32009
 The A2A protocol supports multiple authentication methods:
 
 ```rust
-use a2a_core::{
+use a2a_rs_core::{
     SecurityScheme, ApiKeySecurityScheme, HttpAuthSecurityScheme,
     OAuth2SecurityScheme, MutualTlsSecurityScheme,
     OAuthFlows, AuthorizationCodeOAuthFlow,
@@ -517,8 +517,8 @@ These libraries use minimal, well-maintained dependencies:
 |------------|---------|
 | `serde` | JSON serialization |
 | `tokio` | Async runtime |
-| `axum` | HTTP server (a2a-server) |
-| `reqwest` | HTTP client (a2a-client) |
+| `axum` | HTTP server (a2a-rs-server) |
+| `reqwest` | HTTP client (a2a-rs-client) |
 | `uuid` | UUID generation |
 | `async-trait` | Async trait support |
 

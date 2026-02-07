@@ -9,7 +9,7 @@
 //!     -H "Content-Type: application/json" \
 //!     -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"messageId":"msg-1","role":"ROLE_USER","parts":[{"text":"Hello!"}]}}}'
 
-use a2a_server::A2aServer;
+use a2a_rs_server::A2aServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

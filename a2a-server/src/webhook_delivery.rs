@@ -2,7 +2,7 @@
 //!
 //! Handles delivery of push notification events to registered webhooks.
 
-use a2a_core::{PushNotificationConfig, StreamResponse};
+use a2a_rs_core::{PushNotificationConfig, StreamResponse};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Semaphore};

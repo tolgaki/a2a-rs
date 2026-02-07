@@ -5,8 +5,8 @@
 //! # Example Usage
 //!
 //! ```rust,ignore
-//! use a2a_client::{A2aClient, ClientConfig};
-//! use a2a_core::{Message, Part, Role};
+//! use a2a_rs_client::{A2aClient, ClientConfig};
+//! use a2a_rs_core::{Message, Part, Role};
 //!
 //! let config = ClientConfig {
 //!     server_url: "http://localhost:8080".to_string(),

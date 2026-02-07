@@ -3,7 +3,7 @@
 //! This module defines the core abstraction for implementing A2A agent backends.
 //! Implement the `MessageHandler` trait to create your own agent backend.
 
-use a2a_core::{AgentCard, Message, SendMessageResponse, Task};
+use a2a_rs_core::{AgentCard, Message, SendMessageResponse, Task};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -134,7 +134,7 @@ impl MessageHandler for EchoHandler {
         message: Message,
         _auth: Option<AuthContext>,
     ) -> HandlerResult<SendMessageResponse> {
-        use a2a_core::{now_iso8601, Part, Role, TaskState, TaskStatus};
+        use a2a_rs_core::{now_iso8601, Part, Role, TaskState, TaskStatus};
         use uuid::Uuid;
 
         let text = message
@@ -173,7 +173,7 @@ impl MessageHandler for EchoHandler {
     }
 
     fn agent_card(&self, base_url: &str) -> AgentCard {
-        use a2a_core::{AgentCapabilities, AgentInterface, AgentProvider, AgentSkill, PROTOCOL_VERSION};
+        use a2a_rs_core::{AgentCapabilities, AgentInterface, AgentProvider, AgentSkill, PROTOCOL_VERSION};
 
         AgentCard {
             name: self.agent_name.clone(),

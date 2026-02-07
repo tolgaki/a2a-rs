@@ -13,7 +13,7 @@ use tower::ServiceBuilder;
 const BLOCKING_TIMEOUT: Duration = Duration::from_secs(300);
 const BLOCKING_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-use a2a_core::{
+use a2a_rs_core::{
     error, errors, now_iso8601, success, AgentCard, CancelTaskRequest,
     CreateTaskPushNotificationConfigRequest, DeleteTaskPushNotificationConfigRequest,
     GetTaskPushNotificationConfigRequest, GetTaskRequest, JsonRpcRequest, JsonRpcResponse,
