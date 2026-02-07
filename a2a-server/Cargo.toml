@@ -4,14 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Generic A2A 0.3.0 JSON-RPC server framework"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Generic A2A RC 1.0 JSON-RPC server framework"
+keywords = ["a2a", "agent", "json-rpc", "server"]
+categories = ["web-programming", "network-programming"]
 
 [lib]
 name = "a2a_server"
 path = "src/lib.rs"
 
 [dependencies]
-a2a-core = { path = "../a2a-core" }
+a2a-core = { version = "1.0.0", path = "../a2a-core" }
 anyhow.workspace = true
 axum.workspace = true
 reqwest.workspace = true
@@ -34,3 +39,4 @@ axum = { workspace = true, features = ["macros"] }
 http-body-util = "0.1"
 hyper = "1"
 tower = { workspace = true, features = ["util"] }
+tracing-subscriber = "0.3"

@@ -144,7 +144,7 @@ impl MessageHandler for EchoHandler {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let task_id = format!("tasks/{}", Uuid::new_v4());
+        let task_id = Uuid::new_v4().to_string();
         let context_id = message.context_id.clone().unwrap_or_default();
 
         let response = Message {
@@ -173,19 +173,20 @@ impl MessageHandler for EchoHandler {
     }
 
     fn agent_card(&self, base_url: &str) -> AgentCard {
-        use a2a_core::{AgentCapabilities, AgentInterface, AgentProvider, AgentSkill, PROTOCOL_VERSION, TRANSPORT_JSONRPC};
+        use a2a_core::{AgentCapabilities, AgentInterface, AgentProvider, AgentSkill, PROTOCOL_VERSION};
 
         AgentCard {
             name: self.agent_name.clone(),
-            description: Some("Simple echo agent for testing A2A protocol".to_string()),
+            description: "Simple echo agent for testing A2A protocol".to_string(),
             supported_interfaces: vec![AgentInterface {
                 url: format!("{}/v1/rpc", base_url),
-                transport: TRANSPORT_JSONRPC.to_string(),
+                protocol_binding: "JSONRPC".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                tenant: None,
             }],
             provider: Some(AgentProvider {
-                name: "A2A Demo".to_string(),
-                url: Some("https://github.com/a2a-protocol".to_string()),
-                email: None,
+                organization: "A2A Demo".to_string(),
+                url: "https://github.com/a2a-protocol".to_string(),
             }),
             version: PROTOCOL_VERSION.to_string(),
             documentation_url: None,
@@ -198,9 +199,11 @@ impl MessageHandler for EchoHandler {
                 id: "echo".to_string(),
                 name: "Echo".to_string(),
                 description: "Echoes back the user's message".to_string(),
-                input_schema: None,
-                output_schema: None,
                 tags: vec!["demo".to_string(), "echo".to_string()],
+                examples: vec![],
+                input_modes: vec![],
+                output_modes: vec![],
+                security_requirements: vec![],
             }],
             signatures: vec![],
             icon_url: None,

@@ -4,14 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "A2A 0.3.0 client library for agent communication"
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "A2A RC 1.0 client library for agent communication"
+keywords = ["a2a", "agent", "json-rpc", "client"]
+categories = ["web-programming", "network-programming"]
 
 [lib]
 name = "a2a_client"
 path = "src/lib.rs"
 
 [dependencies]
-a2a-core = { path = "../a2a-core" }
+a2a-core = { version = "1.0.0", path = "../a2a-core" }
 anyhow.workspace = true
 reqwest.workspace = true
 serde.workspace = true

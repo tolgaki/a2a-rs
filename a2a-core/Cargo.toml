@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Core types for the A2A RC 1.0 agent-to-agent protocol"
+keywords = ["a2a", "agent", "json-rpc", "protocol"]
+categories = ["data-structures", "encoding"]
 
 [dependencies]
 serde.workspace = true

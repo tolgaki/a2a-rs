@@ -14,17 +14,17 @@ const BLOCKING_TIMEOUT: Duration = Duration::from_secs(300);
 const BLOCKING_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 use a2a_core::{
-    error, errors, extract_task_id, now_iso8601, success, AgentCard, JsonRpcRequest,
-    JsonRpcResponse, MessageSendParams, PushNotificationConfigCreateParams,
-    PushNotificationConfigDeleteParams, PushNotificationConfigGetParams,
-    PushNotificationConfigListParams, SendMessageResponse, StreamEvent, Task, TaskCancelParams,
-    TaskListParams, TaskQueryParams, TaskState, TaskStatusUpdateEvent, TaskSubscribeParams,
-    PROTOCOL_VERSION,
+    error, errors, now_iso8601, success, AgentCard, CancelTaskRequest,
+    CreateTaskPushNotificationConfigRequest, DeleteTaskPushNotificationConfigRequest,
+    GetTaskPushNotificationConfigRequest, GetTaskRequest, JsonRpcRequest, JsonRpcResponse,
+    ListTaskPushNotificationConfigRequest, ListTasksRequest, SendMessageRequest,
+    SendMessageResponse, StreamResponse, SubscribeToTaskRequest, Task, TaskState,
+    TaskStatusUpdateEvent, PROTOCOL_VERSION,
 };
 
 const A2A_VERSION_HEADER: &str = "A2A-Version";
-const SUPPORTED_VERSION_MAJOR: u32 = 0;
-const SUPPORTED_VERSION_MINOR: u32 = 3;
+const SUPPORTED_VERSION_MAJOR: u32 = 1;
+const SUPPORTED_VERSION_MINOR: u32 = 0;
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -65,7 +65,7 @@ pub struct A2aServer {
     webhook_store: WebhookStore,
     auth_extractor: Option<AuthExtractor>,
     additional_routes: Option<Router<AppState>>,
-    event_tx: broadcast::Sender<StreamEvent>,
+    event_tx: broadcast::Sender<StreamResponse>,
 }
 
 impl A2aServer {
@@ -156,7 +156,7 @@ impl A2aServer {
         router.with_state(state)
     }
 
-    pub fn get_event_sender(&self) -> broadcast::Sender<StreamEvent> {
+    pub fn get_event_sender(&self) -> broadcast::Sender<StreamResponse> {
         self.event_tx.clone()
     }
 
@@ -236,7 +236,7 @@ pub struct AppState {
     webhook_store: WebhookStore,
     card: Arc<AgentCard>,
     auth_extractor: Option<AuthExtractor>,
-    event_tx: broadcast::Sender<StreamEvent>,
+    event_tx: broadcast::Sender<StreamResponse>,
 }
 
 impl AppState {
@@ -248,15 +248,15 @@ impl AppState {
         &self.card
     }
 
-    pub fn event_sender(&self) -> &broadcast::Sender<StreamEvent> {
+    pub fn event_sender(&self) -> &broadcast::Sender<StreamResponse> {
         &self.event_tx
     }
 
-    pub fn subscribe_events(&self) -> broadcast::Receiver<StreamEvent> {
+    pub fn subscribe_events(&self) -> broadcast::Receiver<StreamResponse> {
         self.event_tx.subscribe()
     }
 
-    pub fn broadcast_event(&self, event: StreamEvent) {
+    pub fn broadcast_event(&self, event: StreamResponse) {
         let _ = self.event_tx.send(event);
     }
 
@@ -326,12 +326,17 @@ fn validate_a2a_version(headers: &HeaderMap, req_id: &serde_json::Value) -> Resu
             }
         }
 
+        // Also accept bare "1.0" without minor
+        if version_str == "1" || version_str == "1.0" {
+            return Ok(());
+        }
+
         return Err((
             StatusCode::BAD_REQUEST,
             Json(error(
                 req_id.clone(),
                 errors::VERSION_NOT_SUPPORTED,
-                &format!("Invalid version format: {}. Expected major.minor (e.g., '0.3')", version_str),
+                &format!("Invalid version format: {}. Expected major.minor (e.g., '1.0')", version_str),
                 None,
             )),
         ));
@@ -388,7 +393,7 @@ async fn handle_task_subscribe_sse(
 
     let stream = async_stream::stream! {
         if let Some(task) = task_store.get_flexible(&target_task_id).await {
-            let event = StreamEvent::Task(task);
+            let event = StreamResponse::Task(task);
             if let Ok(json) = serde_json::to_string(&event) {
                 yield Ok(Event::default().data(json));
             }
@@ -398,31 +403,22 @@ async fn handle_task_subscribe_sse(
             match rx.recv().await {
                 Ok(event) => {
                     let matches = match &event {
-                        StreamEvent::Task(t) => {
-                            t.id == target_task_id
-                                || extract_task_id(&t.id).as_deref() == Some(&target_task_id)
-                        }
-                        StreamEvent::StatusUpdate(e) => {
-                            e.task_id == target_task_id
-                                || extract_task_id(&e.task_id).as_deref() == Some(&target_task_id)
-                        }
-                        StreamEvent::ArtifactUpdate(e) => {
-                            e.task_id == target_task_id
-                                || extract_task_id(&e.task_id).as_deref() == Some(&target_task_id)
-                        }
-                        StreamEvent::Message(_) => false,
+                        StreamResponse::Task(t) => t.id == target_task_id,
+                        StreamResponse::StatusUpdate(e) => e.task_id == target_task_id,
+                        StreamResponse::ArtifactUpdate(e) => e.task_id == target_task_id,
+                        StreamResponse::Message(_) => false,
                     };
                     if matches {
                         if let Ok(json) = serde_json::to_string(&event) {
                             yield Ok(Event::default().data(json));
                         }
 
-                        if let StreamEvent::Task(t) = &event {
+                        if let StreamResponse::Task(t) = &event {
                             if t.status.state.is_terminal() {
                                 break;
                             }
                         }
-                        if let StreamEvent::StatusUpdate(e) = &event {
+                        if let StreamResponse::StatusUpdate(e) = &event {
                             if e.status.state.is_terminal() {
                                 break;
                             }
@@ -505,7 +501,7 @@ async fn handle_message_send(
 ) -> (StatusCode, Json<JsonRpcResponse>) {
     let req_id = req.id.clone();
 
-    let params: Result<MessageSendParams, _> =
+    let params: Result<SendMessageRequest, _> =
         serde_json::from_value(req.params.clone().unwrap_or_default());
 
     let params = match params {
@@ -539,7 +535,7 @@ async fn handle_message_send(
                 SendMessageResponse::Task(mut task) => {
                     // Store the task and broadcast event
                     state.task_store.insert(task.clone()).await;
-                    state.broadcast_event(StreamEvent::Task(task.clone()));
+                    state.broadcast_event(StreamResponse::Task(task.clone()));
 
                     // If blocking mode, wait for task to reach terminal state
                     if blocking && !task.status.state.is_terminal() {
@@ -551,12 +547,12 @@ async fn handle_message_send(
                                 tokio::select! {
                                     result = rx.recv() => {
                                         match result {
-                                            Ok(StreamEvent::Task(t)) if t.id == task_id => {
+                                            Ok(StreamResponse::Task(t)) if t.id == task_id => {
                                                 if t.status.state.is_terminal() {
                                                     return Some(t);
                                                 }
                                             }
-                                            Ok(StreamEvent::StatusUpdate(e)) if e.task_id == task_id => {
+                                            Ok(StreamResponse::StatusUpdate(e)) if e.task_id == task_id => {
                                                 if e.status.state.is_terminal() {
                                                     if let Some(t) = state.task_store.get(&task_id).await {
                                                         return Some(t);
@@ -673,7 +669,7 @@ async fn handle_message_stream_rpc(
 async fn handle_message_stream_sse(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(params): Json<MessageSendParams>,
+    Json(params): Json<SendMessageRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<JsonRpcResponse>)> {
     if !state.streaming_enabled() {
         return Err((
@@ -719,14 +715,14 @@ async fn handle_message_stream_sse(
 
     let task_id = task.id.clone();
     state.task_store.insert(task.clone()).await;
-    state.broadcast_event(StreamEvent::Task(task.clone()));
+    state.broadcast_event(StreamResponse::Task(task.clone()));
 
     let mut rx = state.subscribe_events();
     let task_store = state.task_store.clone();
     let target_task_id = task_id;
 
     let stream = async_stream::stream! {
-        let event = StreamEvent::Task(task);
+        let event = StreamResponse::Task(task);
         if let Ok(json) = serde_json::to_string(&event) {
             yield Ok(Event::default().data(json));
         }
@@ -735,14 +731,14 @@ async fn handle_message_stream_sse(
             match rx.recv().await {
                 Ok(event) => {
                     let matches = match &event {
-                        StreamEvent::Task(t) => t.id == target_task_id,
-                        StreamEvent::StatusUpdate(e) => e.task_id == target_task_id,
-                        StreamEvent::ArtifactUpdate(e) => e.task_id == target_task_id,
-                        StreamEvent::Message(m) => {
-                            m.context_id.as_ref().map_or(false, |ctx| {
+                        StreamResponse::Task(t) => t.id == target_task_id,
+                        StreamResponse::StatusUpdate(e) => e.task_id == target_task_id,
+                        StreamResponse::ArtifactUpdate(e) => e.task_id == target_task_id,
+                        StreamResponse::Message(m) => {
+                            m.context_id.as_ref().is_some_and(|ctx| {
                                 task_store.get(&target_task_id).now_or_never()
                                     .flatten()
-                                    .map_or(false, |t| t.context_id == *ctx)
+                                    .is_some_and(|t| t.context_id == *ctx)
                             })
                         }
                     };
@@ -752,12 +748,12 @@ async fn handle_message_stream_sse(
                             yield Ok(Event::default().data(json));
                         }
 
-                        if let StreamEvent::Task(t) = &event {
+                        if let StreamResponse::Task(t) = &event {
                             if t.status.state.is_terminal() {
                                 break;
                             }
                         }
-                        if let StreamEvent::StatusUpdate(e) = &event {
+                        if let StreamResponse::StatusUpdate(e) = &event {
                             if e.status.state.is_terminal() {
                                 break;
                             }
@@ -777,12 +773,12 @@ async fn handle_tasks_get(
     state: AppState,
     req: JsonRpcRequest,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
-    let params: Result<TaskQueryParams, _> =
+    let params: Result<GetTaskRequest, _> =
         serde_json::from_value(req.params.unwrap_or_default());
 
     match params {
         Ok(p) => {
-            match state.task_store.get_flexible(&p.name).await {
+            match state.task_store.get_flexible(&p.id).await {
                 Some(mut task) => {
                     apply_history_length(&mut task, p.history_length);
 
@@ -821,16 +817,14 @@ async fn handle_tasks_cancel(
     state: AppState,
     req: JsonRpcRequest,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
-    let params: Result<TaskCancelParams, _> =
+    let params: Result<CancelTaskRequest, _> =
         serde_json::from_value(req.params.unwrap_or_default());
 
     match params {
         Ok(p) => {
-            let task_id = extract_task_id(&p.name).unwrap_or_else(|| p.name.clone());
-
             let result = state
                 .task_store
-                .update_flexible(&task_id, |task| {
+                .update_flexible(&p.id, |task| {
                     if task.status.state.is_terminal() {
                         return Err(errors::TASK_NOT_CANCELABLE);
                     }
@@ -846,10 +840,11 @@ async fn handle_tasks_cancel(
                         tracing::warn!("Handler cancel_task failed: {}", e);
                     }
 
-                    state.broadcast_event(StreamEvent::StatusUpdate(TaskStatusUpdateEvent {
+                    state.broadcast_event(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
                         task_id: task.id.clone(),
+                        context_id: task.context_id.clone(),
                         status: task.status.clone(),
-                        timestamp: Some(now_iso8601()),
+                        metadata: None,
                     }));
 
                     match serde_json::to_value(task) {
@@ -891,7 +886,7 @@ async fn handle_tasks_list(
     state: AppState,
     req: JsonRpcRequest,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
-    let params: Result<TaskListParams, _> =
+    let params: Result<ListTasksRequest, _> =
         serde_json::from_value(req.params.unwrap_or_default());
 
     match params {
@@ -926,14 +921,12 @@ async fn handle_tasks_subscribe(
     state: AppState,
     req: JsonRpcRequest,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
-    let params: Result<TaskSubscribeParams, _> =
+    let params: Result<SubscribeToTaskRequest, _> =
         serde_json::from_value(req.params.unwrap_or_default());
 
     match params {
         Ok(p) => {
-            let task_id = extract_task_id(&p.name).unwrap_or_else(|| p.name.clone());
-
-            if state.task_store.get_flexible(&task_id).await.is_none() {
+            if state.task_store.get_flexible(&p.id).await.is_none() {
                 return (
                     StatusCode::NOT_FOUND,
                     Json(error(req.id, errors::TASK_NOT_FOUND, "task not found", None)),
@@ -941,7 +934,7 @@ async fn handle_tasks_subscribe(
             }
 
             let base_url = state.endpoint_url().trim_end_matches("/v1/rpc");
-            let subscribe_url = format!("{}/v1/tasks/{}/subscribe", base_url, task_id);
+            let subscribe_url = format!("{}/v1/tasks/{}/subscribe", base_url, p.id);
 
             (
                 StatusCode::OK,
@@ -1028,14 +1021,12 @@ async fn handle_push_config_create(
         );
     }
 
-    let params: Result<PushNotificationConfigCreateParams, _> =
+    let params: Result<CreateTaskPushNotificationConfigRequest, _> =
         serde_json::from_value(req.params.unwrap_or_default());
 
     match params {
         Ok(p) => {
-            let task_id = extract_task_id(&p.parent).unwrap_or_else(|| p.parent.clone());
-
-            if state.task_store.get_flexible(&task_id).await.is_none() {
+            if state.task_store.get_flexible(&p.task_id).await.is_none() {
                 return (
                     StatusCode::NOT_FOUND,
                     Json(error(req.id, errors::TASK_NOT_FOUND, "task not found", None)),
@@ -1044,7 +1035,7 @@ async fn handle_push_config_create(
 
             if let Err(e) = state
                 .webhook_store
-                .set(&task_id, &p.config_id, p.config.clone())
+                .set(&p.task_id, &p.config_id, p.push_notification_config.clone())
                 .await
             {
                 return (
@@ -1059,7 +1050,7 @@ async fn handle_push_config_create(
                     req.id,
                     serde_json::json!({
                         "configId": p.config_id,
-                        "config": p.config
+                        "config": p.push_notification_config
                     }),
                 )),
             )
@@ -1092,28 +1083,18 @@ async fn handle_push_config_get(
         );
     }
 
-    let params: Result<PushNotificationConfigGetParams, _> =
+    let params: Result<GetTaskPushNotificationConfigRequest, _> =
         serde_json::from_value(req.params.unwrap_or_default());
 
     match params {
         Ok(p) => {
-            let parts: Vec<&str> = p.name.split('/').collect();
-            if parts.len() < 4 {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(error(req.id, errors::INVALID_PARAMS, "invalid resource name format", None)),
-                );
-            }
-            let task_id = parts[1];
-            let config_id = parts[3];
-
-            match state.webhook_store.get(task_id, config_id).await {
+            match state.webhook_store.get(&p.task_id, &p.id).await {
                 Some(config) => (
                     StatusCode::OK,
                     Json(success(
                         req.id,
                         serde_json::json!({
-                            "configId": config_id,
+                            "configId": p.id,
                             "config": config
                         }),
                     )),
@@ -1152,13 +1133,12 @@ async fn handle_push_config_list(
         );
     }
 
-    let params: Result<PushNotificationConfigListParams, _> =
+    let params: Result<ListTaskPushNotificationConfigRequest, _> =
         serde_json::from_value(req.params.unwrap_or_default());
 
     match params {
         Ok(p) => {
-            let task_id = extract_task_id(&p.parent).unwrap_or_else(|| p.parent.clone());
-            let configs = state.webhook_store.list(&task_id).await;
+            let configs = state.webhook_store.list(&p.task_id).await;
 
             let configs_json: Vec<_> = configs
                 .iter()
@@ -1209,22 +1189,12 @@ async fn handle_push_config_delete(
         );
     }
 
-    let params: Result<PushNotificationConfigDeleteParams, _> =
+    let params: Result<DeleteTaskPushNotificationConfigRequest, _> =
         serde_json::from_value(req.params.unwrap_or_default());
 
     match params {
         Ok(p) => {
-            let parts: Vec<&str> = p.name.split('/').collect();
-            if parts.len() < 4 {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(error(req.id, errors::INVALID_PARAMS, "invalid resource name format", None)),
-                );
-            }
-            let task_id = parts[1];
-            let config_id = parts[3];
-
-            if state.webhook_store.delete(task_id, config_id).await {
+            if state.webhook_store.delete(&p.task_id, &p.id).await {
                 (StatusCode::OK, Json(success(req.id, serde_json::json!({}))))
             } else {
                 (

@@ -1,6 +1,6 @@
 //! A2A Client Library
 //!
-//! This library provides a reusable client for communicating with A2A 0.3.0 compliant agent servers.
+//! This library provides a reusable client for communicating with A2A RC 1.0 compliant agent servers.
 //!
 //! # Example Usage
 //!

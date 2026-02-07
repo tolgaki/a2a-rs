@@ -2,7 +2,7 @@
 //!
 //! Handles delivery of push notification events to registered webhooks.
 
-use a2a_core::{PushNotificationConfig, StreamEvent};
+use a2a_core::{PushNotificationConfig, StreamResponse};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Semaphore};
@@ -61,7 +61,7 @@ impl WebhookDelivery {
         }
     }
 
-    pub fn start(self: Arc<Self>, mut event_rx: broadcast::Receiver<StreamEvent>) {
+    pub fn start(self: Arc<Self>, mut event_rx: broadcast::Receiver<StreamResponse>) {
         tokio::spawn(async move {
             loop {
                 match event_rx.recv().await {
@@ -80,12 +80,12 @@ impl WebhookDelivery {
         });
     }
 
-    async fn handle_event(self: Arc<Self>, event: StreamEvent) {
+    async fn handle_event(self: Arc<Self>, event: StreamResponse) {
         let task_id = match &event {
-            StreamEvent::Task(t) => &t.id,
-            StreamEvent::StatusUpdate(e) => &e.task_id,
-            StreamEvent::ArtifactUpdate(e) => &e.task_id,
-            StreamEvent::Message(_) => return,
+            StreamResponse::Task(t) => &t.id,
+            StreamResponse::StatusUpdate(e) => &e.task_id,
+            StreamResponse::ArtifactUpdate(e) => &e.task_id,
+            StreamResponse::Message(_) => return,
         };
 
         let configs = self.webhook_store.get_configs_for_task(task_id).await;
@@ -121,7 +121,7 @@ impl WebhookDelivery {
     async fn deliver_with_retry(
         &self,
         config: &PushNotificationConfig,
-        event: &StreamEvent,
+        event: &StreamResponse,
     ) -> Result<(), WebhookError> {
         let payload =
             serde_json::to_string(event).map_err(|e| WebhookError::Serialization(e.to_string()))?;
@@ -172,12 +172,14 @@ impl WebhookDelivery {
 
         // Add authentication if configured
         if let Some(auth) = &config.authentication {
-            match auth.scheme.as_str() {
-                "bearer" => {
-                    request = request.header("Authorization", format!("Bearer {}", auth.credentials));
-                }
-                _ => {
-                    request = request.header("Authorization", format!("{} {}", auth.scheme, auth.credentials));
+            if let Some(credentials) = &auth.credentials {
+                match auth.scheme.as_str() {
+                    "bearer" => {
+                        request = request.header("Authorization", format!("Bearer {}", credentials));
+                    }
+                    _ => {
+                        request = request.header("Authorization", format!("{} {}", auth.scheme, credentials));
+                    }
                 }
             }
         } else if let Some(token) = &config.token {

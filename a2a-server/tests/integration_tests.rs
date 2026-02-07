@@ -85,7 +85,7 @@ async fn test_message_send() {
     // Verify the task was created
     let task = extract_task(rpc_response.result.unwrap());
     assert_eq!(task.status.state, TaskState::Completed);
-    assert!(task.id.contains("tasks/") || !task.id.is_empty());
+    assert!(!task.id.is_empty());
 }
 
 #[tokio::test]
@@ -104,8 +104,8 @@ async fn test_message_send_and_poll() {
     let task = extract_task(rpc_response.result.unwrap());
     let task_id = task.id.clone();
 
-    // Poll the task
-    let request = rpc_request("tasks/get", json!({ "name": task_id }));
+    // Poll the task using direct ID
+    let request = rpc_request("tasks/get", json!({ "id": task_id }));
     let response = router.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -205,7 +205,7 @@ async fn test_task_not_found() {
         .expect("valid address");
     let router = server.build_router();
 
-    let request = rpc_request("tasks/get", json!({ "name": "tasks/nonexistent" }));
+    let request = rpc_request("tasks/get", json!({ "id": "nonexistent" }));
     let response = router.oneshot(request).await.unwrap();
 
     let rpc_response = response_json(response).await;
@@ -229,7 +229,7 @@ async fn test_task_cancel() {
     let task = extract_task(rpc_response.result.unwrap());
 
     // Echo handler tasks complete immediately, so cancel should fail
-    let request = rpc_request("tasks/cancel", json!({ "name": task.id }));
+    let request = rpc_request("tasks/cancel", json!({ "id": task.id }));
     let response = router.oneshot(request).await.unwrap();
     let rpc_response = response_json(response).await;
 

@@ -1,6 +1,6 @@
 //! A2A Server Library
 //!
-//! This library provides a generic, pluggable A2A 0.3.0 compliant JSON-RPC server
+//! This library provides a generic, pluggable A2A RC 1.0 compliant JSON-RPC server
 //! framework. Implement the `MessageHandler` trait to create your own agent backend.
 //!
 //! # Generic Server Example

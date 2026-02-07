@@ -3,10 +3,13 @@ resolver = "2"
 members = ["a2a-core", "a2a-client", "a2a-server"]
 
 [workspace.package]
-version = "0.3.0"
+version = "1.0.0"
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.75"
+repository = "https://github.com/tkellogg/a2a-rs"
+homepage = "https://github.com/tkellogg/a2a-rs"
+readme = "README.md"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

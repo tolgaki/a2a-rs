@@ -18,142 +18,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.0] - 2025-01-15
+
+### Changed
+
+This is a major release aligning all types with the **A2A RC 1.0 proto spec**.
+
+#### a2a-core
+- **Breaking**: `PROTOCOL_VERSION` updated from `"0.3.0"` to `"1.0"`
+- **Breaking**: `AgentCard` — `description` is now required `String` (was `Option<String>`)
+- **Breaking**: `AgentCard` — removed `endpoint`, `url`, `preferred_transport`, `additional_interfaces` fields. Endpoints are now in `supported_interfaces: Vec<AgentInterface>`
+- **Breaking**: `AgentCard` — `security_schemes` is now `HashMap<String, SecurityScheme>` (was `Vec<SecurityScheme>`)
+- **Breaking**: `AgentCard` — `security` renamed to `security_requirements`
+- **Breaking**: `AgentInterface` — `transport` renamed to `protocol_binding`, added `protocol_version` and `tenant` fields
+- **Breaking**: `AgentProvider` — `name` renamed to `organization`, `url` is now required `String`, removed `email`
+- **Breaking**: `SecurityScheme` — changed from internally tagged to externally tagged enum with wrapper structs: `ApiKeySecurityScheme`, `HttpAuthSecurityScheme`, `OAuth2SecurityScheme`, `OpenIdConnectSecurityScheme`, `MutualTlsSecurityScheme`
+- **Breaking**: `OAuthFlows` — changed from struct with optional fields to externally tagged enum: `AuthorizationCode`, `ClientCredentials`, `Implicit`, `Password`, `DeviceCode`. Scopes changed from `Vec<String>` to `HashMap<String, String>`
+- **Breaking**: `SecurityRequirement` — replaced `scheme_name`/`scopes` with `schemes: HashMap<String, StringList>`
+- **Breaking**: `AgentCardSignature` — changed to JWS format: `protected`, `signature`, `header`
+- **Breaking**: `AgentSkill` — removed `input_schema`/`output_schema`, added `examples`, `input_modes`, `output_modes`, `security_requirements`
+- **Breaking**: `Part` — changed from tagged enum (`Part::Text(TextPart)`) to flat struct with optional fields (`text`, `raw`, `url`, `data`, `metadata`, `filename`, `media_type`)
+- **Breaking**: `StreamEvent` renamed to `StreamResponse`
+- **Breaking**: `TaskStatusUpdateEvent` — added required `context_id`, `metadata`; removed `timestamp`
+- **Breaking**: `TaskArtifactUpdateEvent` — added required `context_id`, `append`, `last_chunk`, `metadata`; removed `timestamp`
+- **Breaking**: `AuthenticationInfo.credentials` changed from `String` to `Option<String>`
+- **Breaking**: Request param types renamed: `MessageSendParams` -> `SendMessageRequest`, `TaskQueryParams` -> `GetTaskRequest`, `TaskCancelParams` -> `CancelTaskRequest`, `TaskListParams` -> `ListTasksRequest`, `TaskSubscribeParams` -> `SubscribeToTaskRequest`
+- **Breaking**: Push notification param types renamed and restructured with direct `task_id`/`id` fields instead of resource name parsing
+- **Breaking**: Task IDs are now direct UUIDs (no `tasks/` prefix)
+- **Breaking**: Removed `ApiKeyLocation` enum, `ResourceName` struct, `extract_task_id()` function, `TRANSPORT_JSONRPC` constant
+- Added `DeviceCodeOAuthFlow` type
+- Added `TaskPushNotificationConfig`, `ListTaskPushNotificationConfigResponse`, `GetExtendedAgentCardRequest` types
+- Added `StringList` helper struct
+- Added error code `EXTENSION_SUPPORT_REQUIRED` (-32009)
+- Added `AgentExtension.params` field
+
+#### a2a-server
+- Updated all handlers for RC 1.0 type changes
+- `MessageHandler::handle_message` now returns `HandlerResult<SendMessageResponse>` (was `HandlerResult<Task>`)
+- Updated `EchoHandler` for new `AgentCard`, `AgentProvider`, `AgentInterface`, `AgentSkill` types
+- Updated all JSON-RPC method handlers for renamed request types and direct ID fields
+
+#### a2a-client
+- Updated `send_message` to use `SendMessageRequest` (was `MessageSendParams`)
+- Updated `poll_task` to use `GetTaskRequest` with direct `id` field (was `TaskQueryParams` with `name`)
+- Updated endpoint resolution for new `AgentInterface.protocol_binding` field
+
+---
+
 ## [0.1.0] - 2024-01-15
 
 ### Added
-
-#### a2a-core
-- Complete A2A 0.3.0 specification type definitions
-- `AgentCard` - Agent discovery and capability declaration
-- `Message` - Multimodal message structure with `Part` variants:
-  - `TextPart` - Plain text or markdown content
-  - `FilePart` - File references (URI or base64 bytes)
-  - `DataPart` - Structured JSON data
-- `Task` - Task lifecycle management with state tracking
-- `TaskState` - Full state machine: `Submitted`, `Working`, `InputRequired`, `Completed`, `Failed`, `Cancelled`, `Rejected`, `AuthRequired`
-- `TaskStatus` - Status wrapper with optional message and timestamp
-- `Artifact` - Output artifacts from task processing
-- Security scheme definitions:
-  - `ApiKey` - API key authentication (header, query, cookie)
-  - `Http` - HTTP Basic/Bearer authentication
-  - `OAuth2` - OAuth 2.0 flows (authorization code, client credentials, implicit, password)
-  - `OpenIdConnect` - OpenID Connect discovery
-  - `MutualTls` - Mutual TLS authentication
-- JSON-RPC 2.0 types: `JsonRpcRequest`, `JsonRpcResponse`, `JsonRpcError`
-- A2A-specific error codes (`TASK_NOT_FOUND`, `TASK_NOT_CANCELABLE`, etc.)
-- Helper functions:
-  - `new_message()` - Create messages with text content
-  - `completed_task_with_text()` - Create completed tasks with responses
-  - `now_iso8601()` - Generate ISO 8601 timestamps
-  - `validate_task_id()` - UUID validation
-  - `extract_task_id()` - Parse resource names
-  - `success()` / `error()` - JSON-RPC response builders
-- Method parameter types: `MessageSendParams`, `TaskQueryParams`, `TaskCancelParams`, `TaskListParams`
-- Streaming event types: `StreamEvent`, `TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent`
-- Push notification configuration types
-
-#### a2a-server
-- `MessageHandler` trait - Pluggable backend abstraction
-  - `handle_message()` - Process incoming messages
-  - `agent_card()` - Return agent capabilities
-  - `cancel_task()` - Optional cancellation handling
-  - `supports_streaming()` - Streaming capability flag
-- `A2aServer` - Fluent builder for server configuration
-  - `new()` - Create with custom handler
-  - `echo()` - Create with built-in echo handler
-  - `bind()` - Set server address
-  - `task_store()` - Custom task storage
-  - `auth_extractor()` - Authentication callback
-  - `additional_routes()` - Custom HTTP endpoints
-  - `build_router()` - Get Axum router for embedding
-  - `run()` - Start the server
-- `TaskStore` - Thread-safe in-memory task storage
-  - `insert()` - Store tasks
-  - `get()` - Retrieve by exact ID
-  - `get_flexible()` - Retrieve with ID format normalization
-  - `update()` - Modify tasks with closure
-  - `remove()` - Delete tasks
-  - `list()` - Get all tasks
-- `EchoHandler` - Built-in demo handler
-- `AuthContext` - Authentication context (user_id, access_token, metadata)
-- `HandlerError` - Typed error variants:
-  - `ProcessingFailed`
-  - `BackendUnavailable`
-  - `AuthRequired`
-  - `InvalidInput`
-  - `Internal`
-- HTTP endpoints:
-  - `GET /health` - Health check
-  - `GET /.well-known/agent-card.json` - Agent card discovery
-  - `POST /v1/rpc` - JSON-RPC endpoint
-- JSON-RPC methods:
-  - `message/send` - Send messages to agent
-  - `tasks/get` - Query task status
-  - `tasks/cancel` - Cancel running tasks
-- `AppState` - Shared state for custom routes
-
-#### a2a-client
-- `A2aClient` - Full-featured A2A client
-  - `new()` - Create with configuration
-  - `with_server()` - Quick creation with server URL
-  - `fetch_agent_card()` - Discover agent (5-minute cache)
-  - `invalidate_card_cache()` - Force cache refresh
-  - `send_message()` - Send messages to agents
-  - `poll_task()` - Query task status
-  - `poll_until_complete()` - Poll until terminal state
-  - `perform_oauth_interactive()` - Interactive OAuth flow
-  - `start_oauth_flow()` - Programmatic OAuth initiation
-- `ClientConfig` - Client configuration
-  - `server_url` - Base server URL
-  - `max_polls` - Maximum polling attempts
-  - `poll_interval_ms` - Polling interval
-  - `oauth` - Optional OAuth configuration
-- `OAuthConfig` - OAuth PKCE flow configuration
-  - `client_id` - OAuth client ID
-  - `redirect_uri` - Callback URL
-  - `scopes` - Requested scopes
-  - `session_token` - Pre-existing token
-- PKCE utilities:
-  - `generate_code_verifier()` - Random verifier generation
-  - `generate_code_challenge()` - S256 challenge computation
-  - `generate_random_string()` - State parameter generation
-
-#### Documentation
-- Comprehensive README with examples
-- Architecture guide with diagrams
-- Getting started tutorial
-- Contributing guidelines
-
-### Security
-- PKCE S256 implementation for OAuth flows
-- Bearer token authentication support
-- Session-based authentication with JWT
-- No hardcoded secrets in codebase
-
----
-
-## Version History
-
-| Version | Date | Highlights |
-|---------|------|------------|
-| 0.1.0 | 2024-01-15 | Initial release with full A2A 0.3.0 support |
-
----
-
-## Migration Guides
-
-### Upgrading to 0.1.0
-
-This is the initial release. No migration required.
+- Initial release with A2A 0.3.0 specification support
+- `a2a-core`: Complete type definitions, JSON-RPC types, helper functions
+- `a2a-server`: `MessageHandler` trait, `A2aServer` builder, `TaskStore`, `EchoHandler`
+- `a2a-client`: `A2aClient` with agent card caching, polling, OAuth PKCE support
 
 ---
 
 ## Links
 
-- [A2A Protocol Specification](https://github.com/a2a-protocol/a2a-spec)
+- [A2A Protocol Specification](https://github.com/google/A2A)
 - [Documentation](docs/)
 - [Contributing](CONTRIBUTING.md)
-- [Issue Tracker](../../issues)
 
-[Unreleased]: ../../compare/v0.1.0...HEAD
+[Unreleased]: ../../compare/v1.0.0...HEAD
+[1.0.0]: ../../compare/v0.1.0...v1.0.0
 [0.1.0]: ../../releases/tag/v0.1.0

@@ -2,7 +2,7 @@
 //!
 //! Provides thread-safe storage for A2A tasks.
 
-use a2a_core::{Task, TaskListParams, TaskListResponse};
+use a2a_core::{Task, ListTasksRequest, TaskListResponse};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -131,7 +131,7 @@ impl TaskStore {
     /// List tasks with filtering and pagination
     ///
     /// Returns a TaskListResponse with filtered tasks and pagination info.
-    pub async fn list_filtered(&self, params: &TaskListParams) -> TaskListResponse {
+    pub async fn list_filtered(&self, params: &ListTasksRequest) -> TaskListResponse {
         let guard = self.tasks.read().await;
 
         // Apply filters

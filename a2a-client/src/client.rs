@@ -1,13 +1,13 @@
 //! A2A Client implementation
 //!
-//! Provides a reusable client for A2A 0.3.0 agent communication.
+//! Provides a reusable client for A2A RC 1.0 agent communication.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use a2a_core::{
-    AgentCard, JsonRpcRequest, JsonRpcResponse, Message, MessageSendParams, SendMessageResponse,
-    Task, TaskQueryParams,
+    AgentCard, GetTaskRequest, JsonRpcRequest, JsonRpcResponse, Message, SendMessageRequest,
+    SendMessageResponse, Task,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -273,7 +273,7 @@ impl A2aClient {
         message: Message,
         session_token: Option<&str>,
     ) -> Result<SendMessageResponse> {
-        let params = MessageSendParams {
+        let params = SendMessageRequest {
             tenant: None,
             message,
             configuration: None,
@@ -284,16 +284,10 @@ impl A2aClient {
 
     /// Poll a task by ID
     pub async fn poll_task(&self, task_id: &str, session_token: Option<&str>) -> Result<Task> {
-        // Normalize task ID - add prefix if not present
-        let resource_name = if task_id.starts_with("tasks/") {
-            task_id.into()
-        } else {
-            format!("tasks/{task_id}")
-        };
-
-        let params = TaskQueryParams {
-            name: resource_name,
+        let params = GetTaskRequest {
+            id: task_id.to_string(),
             history_length: None,
+            tenant: None,
         };
         self.json_rpc_call("tasks/get", params, session_token).await
     }

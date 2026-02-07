@@ -1,4 +1,4 @@
-//! Core data structures for A2A v0.3.0 JSON-RPC over HTTP.
+//! Core data structures for A2A RC 1.0 JSON-RPC over HTTP.
 //! Provides shared types for server/client plus minimal helpers for JSON-RPC envelopes and error codes.
 //! Aligned with the authoritative proto definition (specification/a2a.proto).
 
@@ -6,27 +6,25 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: &str = "0.3.0";
-pub const TRANSPORT_JSONRPC: &str = "JSONRPC";
+pub const PROTOCOL_VERSION: &str = "1.0";
 
 // ---------- Agent Card ----------
 
-/// Complete Agent Card per A2A 0.3.0 proto spec
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Complete Agent Card per A2A RC 1.0 proto spec
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCard {
     /// Agent display name (primary identifier per proto)
     pub name: String,
-    /// Optional description
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    /// Agent description (required in RC 1.0)
+    pub description: String,
     /// Supported transport interfaces (contains endpoint URLs)
     #[serde(default)]
     pub supported_interfaces: Vec<AgentInterface>,
     /// Provider/organization information
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<AgentProvider>,
-    /// Supported A2A protocol version (e.g., "0.3")
+    /// Supported A2A protocol version (e.g., "1.0")
     pub version: String,
     /// Link to documentation
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,7 +60,7 @@ impl AgentCard {
     pub fn endpoint(&self) -> Option<&str> {
         self.supported_interfaces
             .iter()
-            .find(|i| i.transport.eq_ignore_ascii_case("jsonrpc"))
+            .find(|i| i.protocol_binding.eq_ignore_ascii_case("jsonrpc"))
             .map(|i| i.url.as_str())
     }
 }
@@ -72,7 +70,10 @@ impl AgentCard {
 #[serde(rename_all = "camelCase")]
 pub struct AgentInterface {
     pub url: String,
-    pub transport: String,
+    pub protocol_binding: String,
+    pub protocol_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 /// Provider/organization information
@@ -80,122 +81,166 @@ pub struct AgentInterface {
 #[serde(rename_all = "camelCase")]
 pub struct AgentProvider {
     /// Organization name
-    pub name: String,
-    /// Provider URL
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// Contact email
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
+    pub organization: String,
+    /// Provider URL (required in RC 1.0)
+    pub url: String,
 }
 
-/// Authentication scheme definition (OpenAPI-style tagged union)
+/// Authentication scheme definition (externally tagged, proto oneof)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type")]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum SecurityScheme {
-    /// API key in header/query/cookie
-    #[serde(rename = "apiKey")]
-    ApiKey {
-        name: String,
-        #[serde(rename = "in")]
-        location: ApiKeyLocation,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-    },
-    /// HTTP Basic or Bearer authentication
-    #[serde(rename = "http")]
-    Http {
-        scheme: String,
-        #[serde(default, skip_serializing_if = "Option::is_none", rename = "bearerFormat")]
-        bearer_format: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-    },
-    /// OAuth 2.0 flows
-    #[serde(rename = "oauth2")]
-    OAuth2 {
-        flows: OAuth2Flows,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-    },
-    /// OpenID Connect Discovery
-    #[serde(rename = "openIdConnect")]
-    OpenIdConnect {
-        #[serde(rename = "openIdConnectUrl")]
-        open_id_connect_url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-    },
-    /// Mutual TLS
-    #[serde(rename = "mutualTLS")]
-    MutualTls {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-    },
+    ApiKeySecurityScheme(ApiKeySecurityScheme),
+    HttpAuthSecurityScheme(HttpAuthSecurityScheme),
+    Oauth2SecurityScheme(OAuth2SecurityScheme),
+    OpenIdConnectSecurityScheme(OpenIdConnectSecurityScheme),
+    MtlsSecurityScheme(MutualTlsSecurityScheme),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiKeySecurityScheme {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Location of the API key (e.g., "header", "query", "cookie")
+    pub location: String,
+    /// Name of the API key parameter
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpAuthSecurityScheme {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// HTTP auth scheme (e.g., "bearer", "basic")
+    pub scheme: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuth2SecurityScheme {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub flows: OAuthFlows,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth2_metadata_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenIdConnectSecurityScheme {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub open_id_connect_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MutualTlsSecurityScheme {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// OAuth2 flows — proto oneof
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
-pub enum ApiKeyLocation {
-    Header,
-    Query,
-    Cookie,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct OAuth2Flows {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authorization_code: Option<OAuth2Flow>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_credentials: Option<OAuth2Flow>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_code: Option<OAuth2Flow>,
+pub enum OAuthFlows {
+    AuthorizationCode(AuthorizationCodeOAuthFlow),
+    ClientCredentials(ClientCredentialsOAuthFlow),
     /// Deprecated per spec
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub implicit: Option<OAuth2Flow>,
+    Implicit(ImplicitOAuthFlow),
     /// Deprecated per spec
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub password: Option<OAuth2Flow>,
+    Password(PasswordOAuthFlow),
+    DeviceCode(DeviceCodeOAuthFlow),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct OAuth2Flow {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authorization_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_url: Option<String>,
+pub struct AuthorizationCodeOAuthFlow {
+    pub authorization_url: String,
+    pub token_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_url: Option<String>,
     #[serde(default)]
-    pub scopes: Vec<String>,
+    pub scopes: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pkce_required: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientCredentialsOAuthFlow {
+    pub token_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_url: Option<String>,
+    #[serde(default)]
+    pub scopes: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImplicitOAuthFlow {
+    pub authorization_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_url: Option<String>,
+    #[serde(default)]
+    pub scopes: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordOAuthFlow {
+    pub token_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_url: Option<String>,
+    #[serde(default)]
+    pub scopes: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceCodeOAuthFlow {
+    pub device_authorization_url: String,
+    pub token_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_url: Option<String>,
+    #[serde(default)]
+    pub scopes: HashMap<String, String>,
+}
+
+/// Helper struct for lists of strings in security requirements
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StringList {
+    #[serde(default)]
+    pub list: Vec<String>,
 }
 
 /// Security requirement for operations
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SecurityRequirement {
-    /// Name of the security scheme
-    pub scheme_name: String,
-    /// Required scopes (for OAuth2/OIDC)
+    /// Map from scheme name to required scopes
     #[serde(default)]
-    pub scopes: Vec<String>,
+    pub schemes: HashMap<String, StringList>,
 }
 
-/// Cryptographic signature for Agent Card verification
+/// Cryptographic signature for Agent Card verification (JWS)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCardSignature {
-    /// Signature algorithm (e.g., "RS256", "ES256")
-    pub algorithm: String,
-    /// Base64-encoded signature
-    pub value: String,
-    /// Public key or key ID for verification
+    /// JWS protected header (base64url-encoded)
+    pub protected: String,
+    /// JWS signature
+    pub signature: String,
+    /// JWS unprotected header
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key_id: Option<String>,
+    pub header: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -219,10 +264,12 @@ pub struct AgentExtension {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
 }
 
 /// Agent skill/capability definition
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSkill {
     /// Unique skill identifier
@@ -231,15 +278,21 @@ pub struct AgentSkill {
     pub name: String,
     /// Capability description
     pub description: String,
-    /// Input JSON schema
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_schema: Option<serde_json::Value>,
-    /// Output JSON schema
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_schema: Option<serde_json::Value>,
     /// Classification tags
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Example prompts or inputs
+    #[serde(default)]
+    pub examples: Vec<String>,
+    /// Accepted input MIME types
+    #[serde(default)]
+    pub input_modes: Vec<String>,
+    /// Produced output MIME types
+    #[serde(default)]
+    pub output_modes: Vec<String>,
+    /// Security requirements for this skill
+    #[serde(default)]
+    pub security_requirements: Vec<SecurityRequirement>,
 }
 
 // ---------- Content Parts ----------
@@ -342,7 +395,7 @@ pub enum Role {
     Agent,
 }
 
-/// Message structure per A2A 0.3.0 proto spec
+/// Message structure per A2A RC 1.0 proto spec
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
@@ -429,7 +482,7 @@ pub struct TaskStatus {
     pub timestamp: Option<String>,
 }
 
-/// Task resource per A2A 0.3.0 proto spec
+/// Task resource per A2A RC 1.0 proto spec
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
@@ -517,6 +570,7 @@ pub mod errors {
     pub const EXTENDED_AGENT_CARD_NOT_CONFIGURED: i32 = -32006;
     pub const VERSION_NOT_SUPPORTED: i32 = -32007;
     pub const INVALID_AGENT_RESPONSE: i32 = -32008;
+    pub const EXTENSION_SUPPORT_REQUIRED: i32 = -32009;
 
     pub fn message_for_code(code: i32) -> &'static str {
         match code {
@@ -533,6 +587,7 @@ pub mod errors {
             EXTENDED_AGENT_CARD_NOT_CONFIGURED => "Extended agent card not configured",
             VERSION_NOT_SUPPORTED => "Protocol version not supported",
             INVALID_AGENT_RESPONSE => "Invalid agent response",
+            EXTENSION_SUPPORT_REQUIRED => "Extension support required",
             _ => "Unknown error",
         }
     }
@@ -565,7 +620,7 @@ pub fn error(id: serde_json::Value, code: i32, message: &str, data: Option<serde
 /// Parameters for message/send operation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct MessageSendParams {
+pub struct SendMessageRequest {
     /// Optional tenant for multi-tenancy
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant: Option<String>,
@@ -573,7 +628,7 @@ pub struct MessageSendParams {
     pub message: Message,
     /// Optional request configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub configuration: Option<MessageSendConfiguration>,
+    pub configuration: Option<SendMessageConfiguration>,
     /// Custom metadata
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
@@ -582,7 +637,7 @@ pub struct MessageSendParams {
 /// Configuration for message send requests
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct MessageSendConfiguration {
+pub struct SendMessageConfiguration {
     /// Preferred output MIME types
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_output_modes: Option<Vec<String>>,
@@ -600,26 +655,32 @@ pub struct MessageSendConfiguration {
 /// Parameters for tasks/get operation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct TaskQueryParams {
-    /// Resource name: "tasks/{task_id}"
-    pub name: String,
+pub struct GetTaskRequest {
+    /// Task ID
+    pub id: String,
     /// Message history depth
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_length: Option<u32>,
+    /// Optional tenant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 /// Parameters for tasks/cancel operation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct TaskCancelParams {
-    /// Resource name: "tasks/{task_id}"
-    pub name: String,
+pub struct CancelTaskRequest {
+    /// Task ID
+    pub id: String,
+    /// Optional tenant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 /// Parameters for tasks/list operation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct TaskListParams {
+pub struct ListTasksRequest {
     /// Filter by context ID
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_id: Option<String>,
@@ -641,6 +702,9 @@ pub struct TaskListParams {
     /// Include artifacts in response
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_artifacts: Option<bool>,
+    /// Optional tenant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 /// Response for tasks/list operation
@@ -660,9 +724,12 @@ pub struct TaskListResponse {
 /// Parameters for tasks/subscribe operation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct TaskSubscribeParams {
-    /// Resource name: "tasks/{task_id}"
-    pub name: String,
+pub struct SubscribeToTaskRequest {
+    /// Task ID
+    pub id: String,
+    /// Optional tenant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 /// Push notification configuration per proto spec
@@ -688,50 +755,77 @@ pub struct PushNotificationConfig {
 pub struct AuthenticationInfo {
     /// Auth scheme (e.g., "bearer", "api_key")
     pub scheme: String,
-    /// Credentials (e.g., token value)
-    pub credentials: String,
+    /// Credentials (e.g., token value) — optional in RC 1.0
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<String>,
+}
+
+/// Wrapper for push notification config with task context
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskPushNotificationConfig {
+    /// Configuration ID
+    pub id: String,
+    /// Associated task ID
+    pub task_id: String,
+    /// The push notification configuration
+    pub push_notification_config: PushNotificationConfig,
+    /// Optional tenant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 /// Parameters for tasks/pushNotificationConfig/create
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct PushNotificationConfigCreateParams {
-    /// Parent resource: "tasks/{task_id}"
-    pub parent: String,
+pub struct CreateTaskPushNotificationConfigRequest {
+    /// Task ID
+    pub task_id: String,
     /// Configuration identifier
     pub config_id: String,
     /// Configuration details
-    pub config: PushNotificationConfig,
+    pub push_notification_config: PushNotificationConfig,
+    /// Optional tenant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 /// Parameters for tasks/pushNotificationConfig/get
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct PushNotificationConfigGetParams {
-    /// Resource name: "tasks/{task_id}/pushNotificationConfigs/{config_id}"
-    pub name: String,
+pub struct GetTaskPushNotificationConfigRequest {
+    /// Config ID
+    pub id: String,
+    /// Task ID
+    pub task_id: String,
+    /// Optional tenant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 /// Parameters for tasks/pushNotificationConfig/list
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct PushNotificationConfigListParams {
-    /// Parent resource: "tasks/{task_id}"
-    pub parent: String,
+pub struct ListTaskPushNotificationConfigRequest {
+    /// Task ID
+    pub task_id: String,
     /// Max configs to return
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_size: Option<u32>,
     /// Pagination cursor
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_token: Option<String>,
+    /// Optional tenant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 /// Response for tasks/pushNotificationConfig/list
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct PushNotificationConfigListResponse {
+pub struct ListTaskPushNotificationConfigResponse {
     /// Push notification configurations
-    pub configs: Vec<PushNotificationConfig>,
+    pub configs: Vec<TaskPushNotificationConfig>,
     /// Next page token
     #[serde(default)]
     pub next_page_token: String,
@@ -740,9 +834,23 @@ pub struct PushNotificationConfigListResponse {
 /// Parameters for tasks/pushNotificationConfig/delete
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct PushNotificationConfigDeleteParams {
-    /// Resource name: "tasks/{task_id}/pushNotificationConfigs/{config_id}"
-    pub name: String,
+pub struct DeleteTaskPushNotificationConfigRequest {
+    /// Config ID
+    pub id: String,
+    /// Task ID
+    pub task_id: String,
+    /// Optional tenant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+}
+
+/// Parameters for agentCard/getExtended
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GetExtendedAgentCardRequest {
+    /// Optional tenant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 // ---------- Streaming event types ----------
@@ -750,7 +858,7 @@ pub struct PushNotificationConfigDeleteParams {
 /// Streaming response per proto spec — uses externally tagged oneof
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub enum StreamEvent {
+pub enum StreamResponse {
     /// Complete task snapshot
     Task(Task),
     /// Direct message response
@@ -767,11 +875,13 @@ pub enum StreamEvent {
 pub struct TaskStatusUpdateEvent {
     /// Task identifier
     pub task_id: String,
+    /// Context identifier
+    pub context_id: String,
     /// Updated status
     pub status: TaskStatus,
-    /// ISO 8601 timestamp
+    /// Custom metadata
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Task artifact update event
@@ -780,11 +890,19 @@ pub struct TaskStatusUpdateEvent {
 pub struct TaskArtifactUpdateEvent {
     /// Task identifier
     pub task_id: String,
+    /// Context identifier
+    pub context_id: String,
     /// New or updated artifact
     pub artifact: Artifact,
-    /// ISO 8601 timestamp
+    /// Whether to append to existing artifact
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<String>,
+    pub append: Option<bool>,
+    /// Whether this is the last chunk
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_chunk: Option<bool>,
+    /// Custom metadata
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 // ---------- Helper functions ----------
@@ -834,55 +952,6 @@ pub fn now_iso8601() -> String {
 /// Validate task ID format (UUID)
 pub fn validate_task_id(id: &str) -> bool {
     Uuid::parse_str(id).is_ok()
-}
-
-/// Extract task ID from resource name (e.g., "tasks/123" -> "123")
-pub fn extract_task_id(resource_name: &str) -> Option<String> {
-    resource_name.strip_prefix("tasks/").map(|s| {
-        s.split('/').next().unwrap_or(s).to_string()
-    })
-}
-
-/// Parsed A2A resource name
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResourceName {
-    pub resource_type: String,
-    pub resource_id: String,
-    pub sub_resource: Option<(String, String)>,
-}
-
-impl ResourceName {
-    pub fn parse(name: &str) -> Option<Self> {
-        let parts: Vec<&str> = name.split('/').collect();
-        match parts.as_slice() {
-            [res_type, res_id] => Some(Self {
-                resource_type: (*res_type).to_string(),
-                resource_id: (*res_id).to_string(),
-                sub_resource: None,
-            }),
-            [res_type, res_id, sub_type, sub_id, ..] => Some(Self {
-                resource_type: (*res_type).to_string(),
-                resource_id: (*res_id).to_string(),
-                sub_resource: Some(((*sub_type).to_string(), (*sub_id).to_string())),
-            }),
-            _ => None,
-        }
-    }
-
-    pub fn task_id(&self) -> Option<&str> {
-        if self.resource_type == "tasks" {
-            Some(&self.resource_id)
-        } else {
-            None
-        }
-    }
-
-    pub fn push_notification_config_id(&self) -> Option<&str> {
-        match &self.sub_resource {
-            Some((sub_type, sub_id)) if sub_type == "pushNotificationConfigs" => Some(sub_id),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -978,26 +1047,27 @@ mod tests {
     fn agent_card_with_security() {
         let card = AgentCard {
             name: "Test Agent".to_string(),
-            description: Some("Test description".to_string()),
+            description: "Test description".to_string(),
             supported_interfaces: vec![AgentInterface {
                 url: "https://example.com/v1/rpc".to_string(),
-                transport: "JSONRPC".to_string(),
+                protocol_binding: "JSONRPC".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                tenant: None,
             }],
             provider: Some(AgentProvider {
-                name: "Test Org".to_string(),
-                url: Some("https://example.com".to_string()),
-                email: None,
+                organization: "Test Org".to_string(),
+                url: "https://example.com".to_string(),
             }),
             version: PROTOCOL_VERSION.to_string(),
             documentation_url: None,
             capabilities: AgentCapabilities::default(),
             security_schemes: {
                 let mut m = HashMap::new();
-                m.insert("apiKey".to_string(), SecurityScheme::ApiKey {
+                m.insert("apiKey".to_string(), SecurityScheme::ApiKeySecurityScheme(ApiKeySecurityScheme {
                     name: "X-API-Key".to_string(),
-                    location: ApiKeyLocation::Header,
+                    location: "header".to_string(),
                     description: None,
-                });
+                }));
                 m
             },
             security_requirements: vec![],
@@ -1022,33 +1092,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_task_id_helper() {
-        assert_eq!(extract_task_id("tasks/abc-123"), Some("abc-123".to_string()));
-        assert_eq!(extract_task_id("abc-123"), None);
-        assert_eq!(extract_task_id("tasks/"), Some("".to_string()));
-        assert_eq!(
-            extract_task_id("tasks/abc-123/pushNotificationConfigs/cfg-1"),
-            Some("abc-123".to_string())
-        );
-    }
-
-    #[test]
-    fn resource_name_parsing() {
-        let res = ResourceName::parse("tasks/abc-123").unwrap();
-        assert_eq!(res.resource_type, "tasks");
-        assert_eq!(res.resource_id, "abc-123");
-        assert!(res.sub_resource.is_none());
-        assert_eq!(res.task_id(), Some("abc-123"));
-
-        let res = ResourceName::parse("tasks/abc-123/pushNotificationConfigs/cfg-1").unwrap();
-        assert_eq!(res.task_id(), Some("abc-123"));
-        assert_eq!(res.push_notification_config_id(), Some("cfg-1"));
-
-        assert!(ResourceName::parse("tasks").is_none());
-        assert!(ResourceName::parse("").is_none());
-    }
-
-    #[test]
     fn validate_task_id_helper() {
         let valid_uuid = Uuid::new_v4().to_string();
         assert!(validate_task_id(&valid_uuid));
@@ -1061,6 +1104,7 @@ mod tests {
         assert_eq!(message_for_code(TASK_NOT_FOUND), "Task not found");
         assert_eq!(message_for_code(VERSION_NOT_SUPPORTED), "Protocol version not supported");
         assert_eq!(message_for_code(INVALID_AGENT_RESPONSE), "Invalid agent response");
+        assert_eq!(message_for_code(EXTENSION_SUPPORT_REQUIRED), "Extension support required");
         assert_eq!(message_for_code(999), "Unknown error");
     }
 
@@ -1085,15 +1129,16 @@ mod tests {
     }
 
     #[test]
-    fn stream_event_serialization() {
-        let event = StreamEvent::StatusUpdate(TaskStatusUpdateEvent {
+    fn stream_response_serialization() {
+        let event = StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
             task_id: "t-1".to_string(),
+            context_id: "ctx-1".to_string(),
             status: TaskStatus {
                 state: TaskState::Working,
                 message: None,
                 timestamp: None,
             },
-            timestamp: None,
+            metadata: None,
         });
         let json = serde_json::to_string(&event).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1108,7 +1153,7 @@ mod tests {
             token: Some("secret".to_string()),
             authentication: Some(AuthenticationInfo {
                 scheme: "bearer".to_string(),
-                credentials: "token123".to_string(),
+                credentials: Some("token123".to_string()),
             }),
         };
         let json = serde_json::to_string(&config).unwrap();
