@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use a2a_core::{
-    AgentCard, JsonRpcRequest, JsonRpcResponse, Message, MessageSendParams, Task, TaskQueryParams,
+    AgentCard, JsonRpcRequest, JsonRpcResponse, Message, MessageSendParams, SendMessageResponse,
+    Task, TaskQueryParams,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -208,7 +209,10 @@ impl A2aClient {
 
         // Fetch agent card and cache the endpoint
         let card = self.fetch_agent_card().await?;
-        let endpoint = card.endpoint.clone();
+        let endpoint = card
+            .endpoint()
+            .ok_or_else(|| anyhow!("Agent card has no JSONRPC endpoint"))?
+            .to_string();
 
         {
             let mut cache = self.endpoint_cache.write().await;
@@ -220,8 +224,8 @@ impl A2aClient {
 
     /// Get the JSON-RPC endpoint URL from the agent card
     #[inline]
-    pub fn get_rpc_url(card: &AgentCard) -> &str {
-        &card.endpoint
+    pub fn get_rpc_url(card: &AgentCard) -> Option<&str> {
+        card.endpoint()
     }
 
     /// Send a JSON-RPC request and parse the response
@@ -263,13 +267,14 @@ impl A2aClient {
             .ok_or_else(|| anyhow!("Server returned no result"))
     }
 
-    /// Send a message to the agent and receive a task
+    /// Send a message to the agent and receive a response (Task or Message)
     pub async fn send_message(
         &self,
         message: Message,
         session_token: Option<&str>,
-    ) -> Result<Task> {
+    ) -> Result<SendMessageResponse> {
         let params = MessageSendParams {
+            tenant: None,
             message,
             configuration: None,
             metadata: None,

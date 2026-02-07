@@ -3,7 +3,7 @@
 //! This module defines the core abstraction for implementing A2A agent backends.
 //! Implement the `MessageHandler` trait to create your own agent backend.
 
-use a2a_core::{AgentCard, Message, Task};
+use a2a_core::{AgentCard, Message, SendMessageResponse, Task};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -11,41 +11,29 @@ use std::sync::Arc;
 pub type HandlerResult<T> = Result<T, HandlerError>;
 
 /// Error type for handler operations
-///
-/// Each variant supports an optional source error for detailed error chains.
 #[derive(Debug, thiserror::Error)]
 pub enum HandlerError {
-    /// Message processing failed
     #[error("Processing failed: {message}")]
     ProcessingFailed {
         message: String,
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
-
-    /// Backend service unavailable
     #[error("Backend unavailable: {message}")]
     BackendUnavailable {
         message: String,
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
-
-    /// Authentication required
     #[error("Authentication required: {0}")]
     AuthRequired(String),
-
-    /// Invalid input
     #[error("Invalid input: {0}")]
     InvalidInput(String),
-
-    /// Internal error
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }
 
 impl HandlerError {
-    /// Create a processing failed error with just a message
     pub fn processing_failed(msg: impl Into<String>) -> Self {
         Self::ProcessingFailed {
             message: msg.into(),
@@ -53,7 +41,6 @@ impl HandlerError {
         }
     }
 
-    /// Create a processing failed error with a source error
     pub fn processing_failed_with<E>(msg: impl Into<String>, source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
@@ -64,7 +51,6 @@ impl HandlerError {
         }
     }
 
-    /// Create a backend unavailable error with just a message
     pub fn backend_unavailable(msg: impl Into<String>) -> Self {
         Self::BackendUnavailable {
             message: msg.into(),
@@ -72,7 +58,6 @@ impl HandlerError {
         }
     }
 
-    /// Create a backend unavailable error with a source error
     pub fn backend_unavailable_with<E>(msg: impl Into<String>, source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
@@ -87,90 +72,37 @@ impl HandlerError {
 /// Authentication context passed to handlers
 #[derive(Clone, Debug)]
 pub struct AuthContext {
-    /// User identifier (e.g., email, subject claim)
     pub user_id: String,
-    /// Access token for backend API calls
     pub access_token: String,
-    /// Optional additional claims/metadata
     pub metadata: Option<serde_json::Value>,
 }
 
 /// Trait for implementing A2A message handlers
 ///
-/// This is the core abstraction for creating A2A agent backends.
-/// Implement this trait to create your own agent (e.g., ChatGPT, Claude, custom).
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use a2a_server::{MessageHandler, HandlerResult, AuthContext};
-/// use a2a_core::{AgentCard, Message, Task};
-/// use async_trait::async_trait;
-///
-/// struct MyAgent {
-///     // your backend client
-/// }
-///
-/// #[async_trait]
-/// impl MessageHandler for MyAgent {
-///     async fn handle_message(
-///         &self,
-///         message: Message,
-///         auth: Option<AuthContext>,
-///     ) -> HandlerResult<Task> {
-///         // Process message with your backend
-///         todo!()
-///     }
-///
-///     fn agent_card(&self, base_url: &str) -> AgentCard {
-///         // Return your agent's card
-///         todo!()
-///     }
-/// }
-/// ```
+/// Returns `SendMessageResponse` which can be either a Task or a direct Message.
 #[async_trait]
 pub trait MessageHandler: Send + Sync {
-    /// Process an incoming A2A message and return a Task
-    ///
-    /// The handler should:
-    /// 1. Process the message (possibly async with backend)
-    /// 2. Return a Task with appropriate state (Working, Completed, Failed, etc.)
-    ///
-    /// For async backends, return a Task in `Working` state and update it later
-    /// via the task store.
+    /// Process an incoming A2A message and return a Task or Message
     async fn handle_message(
         &self,
         message: Message,
         auth: Option<AuthContext>,
-    ) -> HandlerResult<Task>;
+    ) -> HandlerResult<SendMessageResponse>;
 
     /// Return the agent card for this handler
-    ///
-    /// The `base_url` parameter provides the server's base URL for constructing
-    /// endpoint URLs in the agent card.
     fn agent_card(&self, base_url: &str) -> AgentCard;
 
     /// Optional: Handle task cancellation
-    ///
-    /// Override this to implement custom cancellation logic (e.g., abort backend request).
-    /// Default implementation does nothing.
     async fn cancel_task(&self, _task_id: &str) -> HandlerResult<()> {
         Ok(())
     }
 
     /// Optional: Check if handler supports streaming
-    ///
-    /// Default is false. Override to enable streaming support.
     fn supports_streaming(&self) -> bool {
         false
     }
 
     /// Optional: Return an extended agent card for authenticated requests
-    ///
-    /// Override to provide additional agent information to authenticated clients.
-    /// Default returns None (extended card not supported).
-    ///
-    /// This method is async to allow I/O operations (e.g., database lookups).
     async fn extended_agent_card(
         &self,
         _base_url: &str,
@@ -181,12 +113,8 @@ pub trait MessageHandler: Send + Sync {
 }
 
 /// A simple echo handler for testing and demos
-///
-/// This handler simply echoes back the user's message with a prefix.
 pub struct EchoHandler {
-    /// Prefix to add to echoed messages
     pub prefix: String,
-    /// Agent name for the card
     pub agent_name: String,
 }
 
@@ -205,37 +133,32 @@ impl MessageHandler for EchoHandler {
         &self,
         message: Message,
         _auth: Option<AuthContext>,
-    ) -> HandlerResult<Task> {
-        use a2a_core::{now_iso8601, Part, Role, TaskState, TaskStatus, TextPart};
+    ) -> HandlerResult<SendMessageResponse> {
+        use a2a_core::{now_iso8601, Part, Role, TaskState, TaskStatus};
         use uuid::Uuid;
 
-        // Extract text from message
         let text = message
             .parts
             .iter()
-            .filter_map(|p| match p {
-                Part::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
+            .filter_map(|p| p.text.as_deref())
             .collect::<Vec<_>>()
             .join("\n");
 
         let task_id = format!("tasks/{}", Uuid::new_v4());
-
         let context_id = message.context_id.clone().unwrap_or_default();
-        
+
         let response = Message {
-            id: Uuid::new_v4().to_string(),
-            role: Role::Agent,
-            parts: vec![Part::Text(TextPart {
-                text: format!("{} {}", self.prefix, text),
-            })],
+            message_id: Uuid::new_v4().to_string(),
             context_id: message.context_id.clone(),
-            reference_task_ids: None,
+            task_id: None,
+            role: Role::Agent,
+            parts: vec![Part::text(format!("{} {}", self.prefix, text))],
             metadata: None,
+            extensions: vec![],
+            reference_task_ids: None,
         };
 
-        Ok(Task {
+        Ok(SendMessageResponse::Task(Task {
             id: task_id,
             context_id,
             status: TaskStatus {
@@ -246,31 +169,31 @@ impl MessageHandler for EchoHandler {
             history: Some(vec![message, response]),
             artifacts: None,
             metadata: None,
-        })
+        }))
     }
 
     fn agent_card(&self, base_url: &str) -> AgentCard {
-        use a2a_core::{AgentCapabilities, AgentProvider, AgentSkill, PROTOCOL_VERSION};
+        use a2a_core::{AgentCapabilities, AgentInterface, AgentProvider, AgentSkill, PROTOCOL_VERSION, TRANSPORT_JSONRPC};
 
         AgentCard {
-            id: "echo-agent".to_string(),
             name: self.agent_name.clone(),
-            provider: AgentProvider {
+            description: Some("Simple echo agent for testing A2A protocol".to_string()),
+            supported_interfaces: vec![AgentInterface {
+                url: format!("{}/v1/rpc", base_url),
+                transport: TRANSPORT_JSONRPC.to_string(),
+            }],
+            provider: Some(AgentProvider {
                 name: "A2A Demo".to_string(),
                 url: Some("https://github.com/a2a-protocol".to_string()),
                 email: None,
-            },
-            protocol_version: PROTOCOL_VERSION.to_string(),
-            description: Some("Simple echo agent for testing A2A protocol".to_string()),
-            endpoint: format!("{}/v1/rpc", base_url),
-            capabilities: AgentCapabilities {
-                streaming: false,
-                push_notifications: false,
-                state_transition_history: false,
-                extensions: vec![],
-            },
-            security_schemes: vec![],
-            security: vec![],
+            }),
+            version: PROTOCOL_VERSION.to_string(),
+            documentation_url: None,
+            capabilities: AgentCapabilities::default(),
+            security_schemes: Default::default(),
+            security_requirements: vec![],
+            default_input_modes: vec!["text/plain".to_string()],
+            default_output_modes: vec!["text/plain".to_string()],
             skills: vec![AgentSkill {
                 id: "echo".to_string(),
                 name: "Echo".to_string(),
@@ -279,14 +202,8 @@ impl MessageHandler for EchoHandler {
                 output_schema: None,
                 tags: vec!["demo".to_string(), "echo".to_string()],
             }],
-            extensions: vec![],
-            supports_extended_agent_card: false,
-            signature: None,
-            url: Some(format!("{}/v1/rpc", base_url)),
-            preferred_transport: Some("JSONRPC".to_string()),
-            additional_interfaces: vec![],
-            default_input_modes: vec!["text/plain".to_string()],
-            default_output_modes: vec!["text/plain".to_string()],
+            signatures: vec![],
+            icon_url: None,
         }
     }
 }

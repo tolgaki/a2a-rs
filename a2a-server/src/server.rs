@@ -1,7 +1,4 @@
 //! Generic A2A JSON-RPC Server
-//!
-//! This module provides a generic, pluggable A2A server that can work with any
-//! backend via the `MessageHandler` trait.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -13,26 +10,22 @@ use tokio::signal;
 use tokio::time::timeout;
 use tower::ServiceBuilder;
 
-/// Default timeout for blocking requests (5 minutes)
 const BLOCKING_TIMEOUT: Duration = Duration::from_secs(300);
-
-/// Poll interval when waiting for task completion in blocking mode
 const BLOCKING_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 use a2a_core::{
     error, errors, extract_task_id, now_iso8601, success, AgentCard, JsonRpcRequest,
-    JsonRpcResponse, MessageSendParams, PushNotificationConfigDeleteParams,
-    PushNotificationConfigGetParams, PushNotificationConfigListParams,
-    PushNotificationConfigSetParams, StreamEvent, TaskCancelParams, TaskListParams,
-    TaskQueryParams, TaskState, TaskStatusUpdateEvent, TaskSubscribeParams, PROTOCOL_VERSION,
+    JsonRpcResponse, MessageSendParams, PushNotificationConfigCreateParams,
+    PushNotificationConfigDeleteParams, PushNotificationConfigGetParams,
+    PushNotificationConfigListParams, SendMessageResponse, StreamEvent, Task, TaskCancelParams,
+    TaskListParams, TaskQueryParams, TaskState, TaskStatusUpdateEvent, TaskSubscribeParams,
+    PROTOCOL_VERSION,
 };
 
-/// Header name for A2A protocol version
 const A2A_VERSION_HEADER: &str = "A2A-Version";
-
-/// Supported major.minor version (patch versions are ignored per spec)
 const SUPPORTED_VERSION_MAJOR: u32 = 0;
 const SUPPORTED_VERSION_MINOR: u32 = 3;
+
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -48,10 +41,8 @@ use crate::task_store::TaskStore;
 use crate::webhook_delivery::WebhookDelivery;
 use crate::webhook_store::WebhookStore;
 
-/// Server configuration
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// Address to bind the server to (e.g., "0.0.0.0:8080")
     pub bind_address: String,
 }
 
@@ -63,13 +54,10 @@ impl Default for ServerConfig {
     }
 }
 
-/// Authentication callback type for extracting auth context from headers
 pub type AuthExtractor = Arc<dyn Fn(&HeaderMap) -> Option<AuthContext> + Send + Sync>;
 
-/// Broadcast channel capacity for streaming events
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
-/// A2A Server builder for configuring and running the server
 pub struct A2aServer {
     config: ServerConfig,
     handler: BoxedHandler,
@@ -81,7 +69,6 @@ pub struct A2aServer {
 }
 
 impl A2aServer {
-    /// Create a new server builder with the given handler
     pub fn new(handler: impl crate::handler::MessageHandler + 'static) -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
@@ -95,40 +82,26 @@ impl A2aServer {
         }
     }
 
-    /// Create a server with the default echo handler
     pub fn echo() -> Self {
         Self::new(EchoHandler::default())
     }
 
-    /// Set the bind address
-    ///
-    /// Returns an error if the address format is invalid.
     pub fn bind(mut self, address: &str) -> Result<Self, std::net::AddrParseError> {
-        // Validate the address early to catch errors at configuration time
         let _: SocketAddr = address.parse()?;
         self.config.bind_address = address.to_string();
         Ok(self)
     }
 
-    /// Set the bind address (unchecked)
-    ///
-    /// Panics at server start if the address is invalid.
-    /// Prefer `bind()` which validates immediately.
     pub fn bind_unchecked(mut self, address: &str) -> Self {
         self.config.bind_address = address.to_string();
         self
     }
 
-    /// Set a custom task store
     pub fn task_store(mut self, store: TaskStore) -> Self {
         self.task_store = store;
         self
     }
 
-    /// Set an authentication extractor
-    ///
-    /// The extractor is called for each request to extract authentication context
-    /// from the request headers.
     pub fn auth_extractor<F>(mut self, extractor: F) -> Self
     where
         F: Fn(&HeaderMap) -> Option<AuthContext> + Send + Sync + 'static,
@@ -137,24 +110,15 @@ impl A2aServer {
         self
     }
 
-    /// Add additional routes to the server
-    ///
-    /// Use this to add custom endpoints (e.g., OAuth, health checks, etc.)
     pub fn additional_routes(mut self, routes: Router<AppState>) -> Self {
         self.additional_routes = Some(routes);
         self
     }
 
-    /// Get a reference to the task store
-    ///
-    /// Useful for updating tasks from background processes.
     pub fn get_task_store(&self) -> TaskStore {
         self.task_store.clone()
     }
 
-    /// Build the router without starting the server
-    ///
-    /// Useful for testing or embedding in other servers.
     pub fn build_router(self) -> Router {
         let bind: SocketAddr = self.config.bind_address.parse().expect("Invalid bind address");
         let base_url = format!("http://{}", bind);
@@ -169,7 +133,6 @@ impl A2aServer {
             event_tx: self.event_tx,
         };
 
-        // Routes that should have a timeout (non-streaming)
         let timed_routes = Router::new()
             .route("/health", get(health))
             .route("/.well-known/agent-card.json", get(agent_card))
@@ -180,7 +143,6 @@ impl A2aServer {
                     .timeout(Duration::from_secs(30)),
             );
 
-        // SSE routes without timeout (long-lived connections)
         let sse_routes = Router::new()
             .route("/v1/tasks/:task_id/subscribe", get(handle_task_subscribe_sse))
             .route("/v1/message/stream", post(handle_message_stream_sse));
@@ -194,18 +156,13 @@ impl A2aServer {
         router.with_state(state)
     }
 
-    /// Get a reference to the event broadcast sender
-    ///
-    /// Useful for emitting events from background processes.
     pub fn get_event_sender(&self) -> broadcast::Sender<StreamEvent> {
         self.event_tx.clone()
     }
 
-    /// Run the server
     pub async fn run(self) -> anyhow::Result<()> {
         let bind: SocketAddr = self.config.bind_address.parse()?;
 
-        // Start webhook delivery engine for push notifications
         let webhook_delivery = Arc::new(WebhookDelivery::new(self.webhook_store.clone()));
         webhook_delivery.start(self.event_tx.subscribe());
 
@@ -222,7 +179,6 @@ impl A2aServer {
     }
 }
 
-/// Handle timeout errors from the timeout layer
 async fn handle_timeout_error(err: tower::BoxError) -> (StatusCode, Json<JsonRpcResponse>) {
     if err.is::<tower::timeout::error::Elapsed>() {
         (
@@ -247,7 +203,6 @@ async fn handle_timeout_error(err: tower::BoxError) -> (StatusCode, Json<JsonRpc
     }
 }
 
-/// Wait for shutdown signal (Ctrl+C or SIGTERM)
 async fn shutdown_signal() {
     let ctrl_c = async {
         signal::ctrl_c()
@@ -274,7 +229,6 @@ async fn shutdown_signal() {
     info!("Shutdown signal received, initiating graceful shutdown...");
 }
 
-/// Application state shared across handlers
 #[derive(Clone)]
 pub struct AppState {
     handler: BoxedHandler,
@@ -282,54 +236,54 @@ pub struct AppState {
     webhook_store: WebhookStore,
     card: Arc<AgentCard>,
     auth_extractor: Option<AuthExtractor>,
-    /// Broadcast channel for streaming events
     event_tx: broadcast::Sender<StreamEvent>,
 }
 
 impl AppState {
-    /// Get a reference to the task store
     pub fn task_store(&self) -> &TaskStore {
         &self.task_store
     }
 
-    /// Get a reference to the agent card
     pub fn agent_card(&self) -> &AgentCard {
         &self.card
     }
 
-    /// Get a reference to the event broadcast sender
     pub fn event_sender(&self) -> &broadcast::Sender<StreamEvent> {
         &self.event_tx
     }
 
-    /// Subscribe to events
     pub fn subscribe_events(&self) -> broadcast::Receiver<StreamEvent> {
         self.event_tx.subscribe()
     }
 
-    /// Broadcast a stream event
     pub fn broadcast_event(&self, event: StreamEvent) {
-        // Ignore send errors (no receivers)
         let _ = self.event_tx.send(event);
+    }
+
+    /// Check if streaming is enabled in capabilities
+    fn streaming_enabled(&self) -> bool {
+        self.card.capabilities.streaming.unwrap_or(false)
+    }
+
+    /// Check if push notifications are enabled in capabilities
+    fn push_notifications_enabled(&self) -> bool {
+        self.card.capabilities.push_notifications.unwrap_or(false)
+    }
+
+    /// Get the endpoint URL from the agent card
+    fn endpoint_url(&self) -> &str {
+        self.card.endpoint().unwrap_or("")
     }
 }
 
 // ============ History Trimming ============
 
-/// Apply historyLength to a task's history
-///
-/// Per spec:
-/// - None/undefined: server default (include all history)
-/// - Some(0): exclude history entirely
-/// - Some(n): include last n messages
-fn apply_history_length(task: &mut a2a_core::Task, history_length: Option<u32>) {
+fn apply_history_length(task: &mut Task, history_length: Option<u32>) {
     match history_length {
         Some(0) => {
-            // Exclude history entirely
             task.history = None;
         }
         Some(n) => {
-            // Keep only last n messages
             if let Some(ref mut history) = task.history {
                 let len = history.len();
                 if len > n as usize {
@@ -337,27 +291,19 @@ fn apply_history_length(task: &mut a2a_core::Task, history_length: Option<u32>) 
                 }
             }
         }
-        None => {
-            // Keep all history (server default)
-        }
+        None => {}
     }
 }
 
 // ============ Version Validation ============
 
-/// Check if the requested A2A version is supported
-///
-/// Returns Ok(()) if version is supported or not specified (defaults to current).
-/// Returns Err with error response if version is explicitly unsupported.
 fn validate_a2a_version(headers: &HeaderMap, req_id: &serde_json::Value) -> Result<(), (StatusCode, Json<JsonRpcResponse>)> {
     if let Some(version_header) = headers.get(A2A_VERSION_HEADER) {
         let version_str = version_header.to_str().unwrap_or("");
 
-        // Parse major.minor version (e.g., "0.3" or "0.3.0")
         let parts: Vec<&str> = version_str.split('.').collect();
         if parts.len() >= 2 {
             if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                // Check if version is supported (exact major.minor match for now)
                 if major == SUPPORTED_VERSION_MAJOR && minor == SUPPORTED_VERSION_MINOR {
                     return Ok(());
                 }
@@ -380,7 +326,6 @@ fn validate_a2a_version(headers: &HeaderMap, req_id: &serde_json::Value) -> Resu
             }
         }
 
-        // Invalid version format
         return Err((
             StatusCode::BAD_REQUEST,
             Json(error(
@@ -392,15 +337,11 @@ fn validate_a2a_version(headers: &HeaderMap, req_id: &serde_json::Value) -> Resu
         ));
     }
 
-    // No version header - use default (current version)
     Ok(())
 }
 
 // ============ Error Response Helpers ============
 
-/// Create a JSON-RPC error response tuple
-///
-/// Combines the HTTP status code with a JSON-RPC error response.
 #[allow(dead_code)]
 pub fn rpc_error(
     id: serde_json::Value,
@@ -411,9 +352,6 @@ pub fn rpc_error(
     (status, Json(error(id, code, message, None)))
 }
 
-/// Create a JSON-RPC error response tuple with additional data
-///
-/// Combines the HTTP status code with a JSON-RPC error response that includes extra data.
 #[allow(dead_code)]
 pub fn rpc_error_with_data(
     id: serde_json::Value,
@@ -425,9 +363,6 @@ pub fn rpc_error_with_data(
     (status, Json(error(id, code, message, Some(data))))
 }
 
-/// Create a JSON-RPC success response tuple
-///
-/// Returns HTTP 200 OK with the JSON-RPC result.
 #[allow(dead_code)]
 pub fn rpc_success(id: serde_json::Value, result: serde_json::Value) -> (StatusCode, Json<JsonRpcResponse>) {
     (StatusCode::OK, Json(success(id, result)))
@@ -443,19 +378,15 @@ async fn agent_card(State(state): State<AppState>) -> Json<AgentCard> {
     Json((*state.card).clone())
 }
 
-/// SSE endpoint for task subscription
 async fn handle_task_subscribe_sse(
     State(state): State<AppState>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    // Extract only what we need to avoid capturing full AppState in the stream closure
-    // This prevents memory leaks by not holding references to handler, webhook_store, etc.
     let mut rx = state.subscribe_events();
     let task_store = state.task_store.clone();
     let target_task_id = task_id;
 
     let stream = async_stream::stream! {
-        // Send initial task state if it exists
         if let Some(task) = task_store.get_flexible(&target_task_id).await {
             let event = StreamEvent::Task(task);
             if let Ok(json) = serde_json::to_string(&event) {
@@ -463,40 +394,35 @@ async fn handle_task_subscribe_sse(
             }
         }
 
-        // Stream subsequent updates
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    // Check if this event matches our target task
                     let matches = match &event {
                         StreamEvent::Task(t) => {
                             t.id == target_task_id
                                 || extract_task_id(&t.id).as_deref() == Some(&target_task_id)
                         }
-                        StreamEvent::TaskStatusUpdate(e) => {
+                        StreamEvent::StatusUpdate(e) => {
                             e.task_id == target_task_id
                                 || extract_task_id(&e.task_id).as_deref() == Some(&target_task_id)
                         }
-                        StreamEvent::TaskArtifactUpdate(e) => {
+                        StreamEvent::ArtifactUpdate(e) => {
                             e.task_id == target_task_id
                                 || extract_task_id(&e.task_id).as_deref() == Some(&target_task_id)
                         }
                         StreamEvent::Message(_) => false,
-                        // Handle future event types (non_exhaustive)
-                        _ => false,
                     };
                     if matches {
                         if let Ok(json) = serde_json::to_string(&event) {
                             yield Ok(Event::default().data(json));
                         }
 
-                        // Check if task is in terminal state
                         if let StreamEvent::Task(t) = &event {
                             if t.status.state.is_terminal() {
                                 break;
                             }
                         }
-                        if let StreamEvent::TaskStatusUpdate(e) = &event {
+                        if let StreamEvent::StatusUpdate(e) = &event {
                             if e.status.state.is_terminal() {
                                 break;
                             }
@@ -504,7 +430,6 @@ async fn handle_task_subscribe_sse(
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    // Missed some events, continue
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => {
@@ -527,29 +452,28 @@ async fn handle_rpc(
         return (StatusCode::BAD_REQUEST, Json(resp));
     }
 
-    // Validate A2A protocol version if specified
     if let Err(err_response) = validate_a2a_version(&headers, &req.id) {
         return err_response;
     }
 
-    // Extract auth context if extractor is configured
     let auth_context = state
         .auth_extractor
         .as_ref()
         .and_then(|extractor| extractor(&headers));
 
     match req.method.as_str() {
+        // Spec method names per JSON-RPC binding
         "message/send" => handle_message_send(state, req, auth_context).await,
-        "message/stream" => handle_message_stream_rpc(state, req).await,
+        "message/sendStreaming" => handle_message_stream_rpc(state, req).await,
         "tasks/get" => handle_tasks_get(state, req).await,
         "tasks/list" => handle_tasks_list(state, req).await,
         "tasks/cancel" => handle_tasks_cancel(state, req).await,
         "tasks/subscribe" => handle_tasks_subscribe(state, req).await,
-        "tasks/pushNotificationConfig/set" => handle_push_config_set(state, req).await,
+        "tasks/pushNotificationConfig/create" => handle_push_config_create(state, req).await,
         "tasks/pushNotificationConfig/get" => handle_push_config_get(state, req).await,
         "tasks/pushNotificationConfig/list" => handle_push_config_list(state, req).await,
         "tasks/pushNotificationConfig/delete" => handle_push_config_delete(state, req).await,
-        "agent/getExtendedAgentCard" => {
+        "agentCard/getExtended" => {
             handle_get_extended_agent_card(state, req, auth_context).await
         }
         _ => (
@@ -561,6 +485,16 @@ async fn handle_rpc(
                 None,
             )),
         ),
+    }
+}
+
+fn handler_error_to_rpc(e: &HandlerError) -> (i32, StatusCode) {
+    match e {
+        HandlerError::InvalidInput(_) => (errors::INVALID_PARAMS, StatusCode::BAD_REQUEST),
+        HandlerError::AuthRequired(_) => (errors::INVALID_REQUEST, StatusCode::UNAUTHORIZED),
+        HandlerError::BackendUnavailable { .. } => (errors::INTERNAL_ERROR, StatusCode::SERVICE_UNAVAILABLE),
+        HandlerError::ProcessingFailed { .. } => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
+        HandlerError::Internal(_) => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -589,7 +523,6 @@ async fn handle_message_send(
         }
     };
 
-    // Extract configuration options
     let blocking = params
         .configuration
         .as_ref()
@@ -600,118 +533,116 @@ async fn handle_message_send(
         .as_ref()
         .and_then(|c| c.history_length);
 
-    // Call the handler
     match state.handler.handle_message(params.message, auth_context).await {
-        Ok(mut task) => {
-            // Store the task and broadcast event
-            state.task_store.insert(task.clone()).await;
-            state.broadcast_event(StreamEvent::Task(task.clone()));
+        Ok(response) => {
+            match response {
+                SendMessageResponse::Task(mut task) => {
+                    // Store the task and broadcast event
+                    state.task_store.insert(task.clone()).await;
+                    state.broadcast_event(StreamEvent::Task(task.clone()));
 
-            // If blocking mode, wait for task to reach terminal state
-            if blocking && !task.status.state.is_terminal() {
-                let task_id = task.id.clone();
-                let mut rx = state.subscribe_events();
+                    // If blocking mode, wait for task to reach terminal state
+                    if blocking && !task.status.state.is_terminal() {
+                        let task_id = task.id.clone();
+                        let mut rx = state.subscribe_events();
 
-                let wait_result = timeout(BLOCKING_TIMEOUT, async {
-                    loop {
-                        tokio::select! {
-                            result = rx.recv() => {
-                                match result {
-                                    Ok(StreamEvent::Task(t)) if t.id == task_id => {
-                                        if t.status.state.is_terminal() {
-                                            return Some(t);
+                        let wait_result = timeout(BLOCKING_TIMEOUT, async {
+                            loop {
+                                tokio::select! {
+                                    result = rx.recv() => {
+                                        match result {
+                                            Ok(StreamEvent::Task(t)) if t.id == task_id => {
+                                                if t.status.state.is_terminal() {
+                                                    return Some(t);
+                                                }
+                                            }
+                                            Ok(StreamEvent::StatusUpdate(e)) if e.task_id == task_id => {
+                                                if e.status.state.is_terminal() {
+                                                    if let Some(t) = state.task_store.get(&task_id).await {
+                                                        return Some(t);
+                                                    }
+                                                }
+                                            }
+                                            Err(broadcast::error::RecvError::Closed) => {
+                                                return None;
+                                            }
+                                            _ => {}
                                         }
                                     }
-                                    Ok(StreamEvent::TaskStatusUpdate(e)) if e.task_id == task_id => {
-                                        if e.status.state.is_terminal() {
-                                            // Fetch full task from store
-                                            if let Some(t) = state.task_store.get(&task_id).await {
+                                    _ = tokio::time::sleep(BLOCKING_POLL_INTERVAL) => {
+                                        if let Some(t) = state.task_store.get(&task_id).await {
+                                            if t.status.state.is_terminal() {
                                                 return Some(t);
                                             }
                                         }
                                     }
-                                    Err(broadcast::error::RecvError::Closed) => {
-                                        return None;
-                                    }
-                                    _ => {}
                                 }
                             }
-                            _ = tokio::time::sleep(BLOCKING_POLL_INTERVAL) => {
-                                // Periodic check in case we missed an event
-                                if let Some(t) = state.task_store.get(&task_id).await {
-                                    if t.status.state.is_terminal() {
-                                        return Some(t);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                })
-                .await;
+                        })
+                        .await;
 
-                match wait_result {
-                    Ok(Some(final_task)) => task = final_task,
-                    Ok(None) => {
-                        // Channel closed, try to get latest state
-                        if let Some(t) = state.task_store.get(&task_id).await {
-                            task = t;
+                        match wait_result {
+                            Ok(Some(final_task)) => task = final_task,
+                            Ok(None) => {
+                                if let Some(t) = state.task_store.get(&task.id).await {
+                                    task = t;
+                                }
+                            }
+                            Err(_) => {
+                                tracing::warn!("Blocking request timed out for task {}", task.id);
+                                if let Some(t) = state.task_store.get(&task.id).await {
+                                    task = t;
+                                }
+                            }
                         }
                     }
-                    Err(_) => {
-                        // Timeout - return current state with a note
-                        tracing::warn!("Blocking request timed out for task {}", task_id);
-                        if let Some(t) = state.task_store.get(&task_id).await {
-                            task = t;
-                        }
+
+                    apply_history_length(&mut task, history_length);
+
+                    // Wrap in SendMessageResponse for spec-compliant serialization
+                    let resp = SendMessageResponse::Task(task);
+                    match serde_json::to_value(resp) {
+                        Ok(val) => (StatusCode::OK, Json(success(req_id, val))),
+                        Err(e) => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(error(
+                                req_id,
+                                errors::INTERNAL_ERROR,
+                                "serialization failed",
+                                Some(serde_json::json!({"error": e.to_string()})),
+                            )),
+                        ),
+                    }
+                }
+                SendMessageResponse::Message(msg) => {
+                    let resp = SendMessageResponse::Message(msg);
+                    match serde_json::to_value(resp) {
+                        Ok(val) => (StatusCode::OK, Json(success(req_id, val))),
+                        Err(e) => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(error(
+                                req_id,
+                                errors::INTERNAL_ERROR,
+                                "serialization failed",
+                                Some(serde_json::json!({"error": e.to_string()})),
+                            )),
+                        ),
                     }
                 }
             }
-
-            // Apply history length trimming
-            apply_history_length(&mut task, history_length);
-
-            match serde_json::to_value(task) {
-                Ok(val) => (StatusCode::OK, Json(success(req_id, val))),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(error(
-                        req_id,
-                        errors::INTERNAL_ERROR,
-                        "serialization failed",
-                        Some(serde_json::json!({"error": e.to_string()})),
-                    )),
-                ),
-            }
         }
         Err(e) => {
-            let (code, status) = match &e {
-                HandlerError::InvalidInput(_) => (errors::INVALID_PARAMS, StatusCode::BAD_REQUEST),
-                HandlerError::AuthRequired(_) => (errors::INVALID_REQUEST, StatusCode::UNAUTHORIZED),
-                HandlerError::BackendUnavailable { .. } => (errors::INTERNAL_ERROR, StatusCode::SERVICE_UNAVAILABLE),
-                HandlerError::ProcessingFailed { .. } => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
-                HandlerError::Internal(_) => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
-            };
-
-            (
-                status,
-                Json(error(
-                    req_id,
-                    code,
-                    &e.to_string(),
-                    None,
-                )),
-            )
+            let (code, status) = handler_error_to_rpc(&e);
+            (status, Json(error(req_id, code, &e.to_string(), None)))
         }
     }
 }
 
-/// JSON-RPC handler for message/stream - returns SSE endpoint URL
 async fn handle_message_stream_rpc(
     state: AppState,
     req: JsonRpcRequest,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
-    // Check if streaming is supported
-    if !state.card.capabilities.streaming {
+    if !state.streaming_enabled() {
         return (
             StatusCode::BAD_REQUEST,
             Json(error(
@@ -723,8 +654,7 @@ async fn handle_message_stream_rpc(
         );
     }
 
-    // Return the streaming endpoint URL
-    let base_url = state.card.endpoint.trim_end_matches("/v1/rpc");
+    let base_url = state.endpoint_url().trim_end_matches("/v1/rpc");
     let stream_url = format!("{}/v1/message/stream", base_url);
 
     (
@@ -740,14 +670,12 @@ async fn handle_message_stream_rpc(
     )
 }
 
-/// SSE endpoint for streaming message responses
 async fn handle_message_stream_sse(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(params): Json<MessageSendParams>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<JsonRpcResponse>)> {
-    // Check if streaming is supported
-    if !state.card.capabilities.streaming {
+    if !state.streaming_enabled() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(error(
@@ -759,62 +687,64 @@ async fn handle_message_stream_sse(
         ));
     }
 
-    // Extract auth context
     let auth_context = state
         .auth_extractor
         .as_ref()
         .and_then(|extractor| extractor(&headers));
 
-    // Call the handler to create initial task
-    let task = state
+    let response = state
         .handler
         .handle_message(params.message, auth_context)
         .await
         .map_err(|e| {
-            let (code, status) = match &e {
-                HandlerError::InvalidInput(_) => (errors::INVALID_PARAMS, StatusCode::BAD_REQUEST),
-                HandlerError::AuthRequired(_) => (errors::INVALID_REQUEST, StatusCode::UNAUTHORIZED),
-                HandlerError::BackendUnavailable { .. } => (errors::INTERNAL_ERROR, StatusCode::SERVICE_UNAVAILABLE),
-                HandlerError::ProcessingFailed { .. } => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
-                HandlerError::Internal(_) => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
-            };
+            let (code, status) = handler_error_to_rpc(&e);
             (status, Json(error(serde_json::Value::Null, code, &e.to_string(), None)))
         })?;
 
-    // Store the task
+    // Extract task from response (streaming only works with tasks)
+    let task = match response {
+        SendMessageResponse::Task(t) => t,
+        SendMessageResponse::Message(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(error(
+                    serde_json::Value::Null,
+                    errors::UNSUPPORTED_OPERATION,
+                    "handler returned a message, streaming requires a task",
+                    None,
+                )),
+            ));
+        }
+    };
+
     let task_id = task.id.clone();
     state.task_store.insert(task.clone()).await;
     state.broadcast_event(StreamEvent::Task(task.clone()));
 
-    // Create SSE stream for this task
     let mut rx = state.subscribe_events();
     let task_store = state.task_store.clone();
     let target_task_id = task_id;
 
     let stream = async_stream::stream! {
-        // Send initial task state
         let event = StreamEvent::Task(task);
         if let Ok(json) = serde_json::to_string(&event) {
             yield Ok(Event::default().data(json));
         }
 
-        // Stream subsequent updates
         loop {
             match rx.recv().await {
                 Ok(event) => {
                     let matches = match &event {
                         StreamEvent::Task(t) => t.id == target_task_id,
-                        StreamEvent::TaskStatusUpdate(e) => e.task_id == target_task_id,
-                        StreamEvent::TaskArtifactUpdate(e) => e.task_id == target_task_id,
+                        StreamEvent::StatusUpdate(e) => e.task_id == target_task_id,
+                        StreamEvent::ArtifactUpdate(e) => e.task_id == target_task_id,
                         StreamEvent::Message(m) => {
-                            // Include messages from same context
                             m.context_id.as_ref().map_or(false, |ctx| {
                                 task_store.get(&target_task_id).now_or_never()
                                     .flatten()
                                     .map_or(false, |t| t.context_id == *ctx)
                             })
                         }
-                        _ => false,
                     };
 
                     if matches {
@@ -822,13 +752,12 @@ async fn handle_message_stream_sse(
                             yield Ok(Event::default().data(json));
                         }
 
-                        // Check if task reached terminal state
                         if let StreamEvent::Task(t) = &event {
                             if t.status.state.is_terminal() {
                                 break;
                             }
                         }
-                        if let StreamEvent::TaskStatusUpdate(e) = &event {
+                        if let StreamEvent::StatusUpdate(e) = &event {
                             if e.status.state.is_terminal() {
                                 break;
                             }
@@ -855,7 +784,6 @@ async fn handle_tasks_get(
         Ok(p) => {
             match state.task_store.get_flexible(&p.name).await {
                 Some(mut task) => {
-                    // Apply history length trimming
                     apply_history_length(&mut task, p.history_length);
 
                     match serde_json::to_value(task) {
@@ -900,14 +828,13 @@ async fn handle_tasks_cancel(
         Ok(p) => {
             let task_id = extract_task_id(&p.name).unwrap_or_else(|| p.name.clone());
 
-            // Atomic update - check and update in single operation to prevent race conditions
             let result = state
                 .task_store
                 .update_flexible(&task_id, |task| {
                     if task.status.state.is_terminal() {
                         return Err(errors::TASK_NOT_CANCELABLE);
                     }
-                    task.status.state = TaskState::Cancelled;
+                    task.status.state = TaskState::Canceled;
                     task.status.timestamp = Some(now_iso8601());
                     Ok(())
                 })
@@ -915,12 +842,11 @@ async fn handle_tasks_cancel(
 
             match result {
                 Some(Ok(task)) => {
-                    // Call handler's cancel method (best effort, after state change)
                     if let Err(e) = state.handler.cancel_task(&task.id).await {
                         tracing::warn!("Handler cancel_task failed: {}", e);
                     }
 
-                    state.broadcast_event(StreamEvent::TaskStatusUpdate(TaskStatusUpdateEvent {
+                    state.broadcast_event(StreamEvent::StatusUpdate(TaskStatusUpdateEvent {
                         task_id: task.id.clone(),
                         status: task.status.clone(),
                         timestamp: Some(now_iso8601()),
@@ -1005,10 +931,8 @@ async fn handle_tasks_subscribe(
 
     match params {
         Ok(p) => {
-            // Extract task ID from resource name
             let task_id = extract_task_id(&p.name).unwrap_or_else(|| p.name.clone());
 
-            // Check if task exists
             if state.task_store.get_flexible(&task_id).await.is_none() {
                 return (
                     StatusCode::NOT_FOUND,
@@ -1016,8 +940,7 @@ async fn handle_tasks_subscribe(
                 );
             }
 
-            // Return the SSE endpoint URL for this task
-            let base_url = state.card.endpoint.trim_end_matches("/v1/rpc");
+            let base_url = state.endpoint_url().trim_end_matches("/v1/rpc");
             let subscribe_url = format!("{}/v1/tasks/{}/subscribe", base_url, task_id);
 
             (
@@ -1048,7 +971,6 @@ async fn handle_get_extended_agent_card(
     req: JsonRpcRequest,
     auth_context: Option<AuthContext>,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
-    // Extended agent card requires authentication
     let Some(auth) = auth_context else {
         return (
             StatusCode::UNAUTHORIZED,
@@ -1061,8 +983,7 @@ async fn handle_get_extended_agent_card(
         );
     };
 
-    // Get base URL from the agent card
-    let base_url = state.card.endpoint.trim_end_matches("/v1/rpc");
+    let base_url = state.endpoint_url().trim_end_matches("/v1/rpc");
 
     match state.handler.extended_agent_card(base_url, &auth).await {
         Some(card) => match serde_json::to_value(card) {
@@ -1091,12 +1012,11 @@ async fn handle_get_extended_agent_card(
 
 // ============ Push Notification Config Handlers ============
 
-async fn handle_push_config_set(
+async fn handle_push_config_create(
     state: AppState,
     req: JsonRpcRequest,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
-    // Check if push notifications are supported
-    if !state.card.capabilities.push_notifications {
+    if !state.push_notifications_enabled() {
         return (
             StatusCode::BAD_REQUEST,
             Json(error(
@@ -1108,15 +1028,13 @@ async fn handle_push_config_set(
         );
     }
 
-    let params: Result<PushNotificationConfigSetParams, _> =
+    let params: Result<PushNotificationConfigCreateParams, _> =
         serde_json::from_value(req.params.unwrap_or_default());
 
     match params {
         Ok(p) => {
-            // Extract task ID from parent
             let task_id = extract_task_id(&p.parent).unwrap_or_else(|| p.parent.clone());
 
-            // Check if task exists
             if state.task_store.get_flexible(&task_id).await.is_none() {
                 return (
                     StatusCode::NOT_FOUND,
@@ -1124,7 +1042,6 @@ async fn handle_push_config_set(
                 );
             }
 
-            // Store the config (with URL validation)
             if let Err(e) = state
                 .webhook_store
                 .set(&task_id, &p.config_id, p.config.clone())
@@ -1132,12 +1049,7 @@ async fn handle_push_config_set(
             {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(error(
-                        req.id,
-                        errors::INVALID_PARAMS,
-                        &e.to_string(),
-                        None,
-                    )),
+                    Json(error(req.id, errors::INVALID_PARAMS, &e.to_string(), None)),
                 );
             }
 
@@ -1168,7 +1080,7 @@ async fn handle_push_config_get(
     state: AppState,
     req: JsonRpcRequest,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
-    if !state.card.capabilities.push_notifications {
+    if !state.push_notifications_enabled() {
         return (
             StatusCode::BAD_REQUEST,
             Json(error(
@@ -1185,17 +1097,11 @@ async fn handle_push_config_get(
 
     match params {
         Ok(p) => {
-            // Parse name: "tasks/{task_id}/pushNotificationConfigs/{config_id}"
             let parts: Vec<&str> = p.name.split('/').collect();
             if parts.len() < 4 {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(error(
-                        req.id,
-                        errors::INVALID_PARAMS,
-                        "invalid resource name format",
-                        None,
-                    )),
+                    Json(error(req.id, errors::INVALID_PARAMS, "invalid resource name format", None)),
                 );
             }
             let task_id = parts[1];
@@ -1214,12 +1120,7 @@ async fn handle_push_config_get(
                 ),
                 None => (
                     StatusCode::NOT_FOUND,
-                    Json(error(
-                        req.id,
-                        errors::TASK_NOT_FOUND,
-                        "push notification config not found",
-                        None,
-                    )),
+                    Json(error(req.id, errors::TASK_NOT_FOUND, "push notification config not found", None)),
                 ),
             }
         }
@@ -1239,7 +1140,7 @@ async fn handle_push_config_list(
     state: AppState,
     req: JsonRpcRequest,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
-    if !state.card.capabilities.push_notifications {
+    if !state.push_notifications_enabled() {
         return (
             StatusCode::BAD_REQUEST,
             Json(error(
@@ -1296,7 +1197,7 @@ async fn handle_push_config_delete(
     state: AppState,
     req: JsonRpcRequest,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
-    if !state.card.capabilities.push_notifications {
+    if !state.push_notifications_enabled() {
         return (
             StatusCode::BAD_REQUEST,
             Json(error(
@@ -1313,17 +1214,11 @@ async fn handle_push_config_delete(
 
     match params {
         Ok(p) => {
-            // Parse name: "tasks/{task_id}/pushNotificationConfigs/{config_id}"
             let parts: Vec<&str> = p.name.split('/').collect();
             if parts.len() < 4 {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(error(
-                        req.id,
-                        errors::INVALID_PARAMS,
-                        "invalid resource name format",
-                        None,
-                    )),
+                    Json(error(req.id, errors::INVALID_PARAMS, "invalid resource name format", None)),
                 );
             }
             let task_id = parts[1];
@@ -1334,12 +1229,7 @@ async fn handle_push_config_delete(
             } else {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(error(
-                        req.id,
-                        errors::TASK_NOT_FOUND,
-                        "push notification config not found",
-                        None,
-                    )),
+                    Json(error(req.id, errors::TASK_NOT_FOUND, "push notification config not found", None)),
                 )
             }
         }
@@ -1355,7 +1245,6 @@ async fn handle_push_config_delete(
     }
 }
 
-/// Convenience function to run a server with a handler
 pub async fn run_server<H: crate::handler::MessageHandler + 'static>(
     bind_addr: &str,
     handler: H,
@@ -1363,7 +1252,6 @@ pub async fn run_server<H: crate::handler::MessageHandler + 'static>(
     A2aServer::new(handler).bind(bind_addr)?.run().await
 }
 
-/// Convenience function to run the default echo server
 pub async fn run_echo_server(bind_addr: &str) -> anyhow::Result<()> {
     A2aServer::echo().bind(bind_addr)?.run().await
 }

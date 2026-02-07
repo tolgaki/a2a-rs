@@ -6,7 +6,7 @@
 //!
 //! ```rust,ignore
 //! use a2a_client::{A2aClient, ClientConfig};
-//! use a2a_core::{Message, Part, Role, TextPart};
+//! use a2a_core::{Message, Part, Role};
 //!
 //! let config = ClientConfig {
 //!     server_url: "http://localhost:8080".to_string(),
@@ -19,15 +19,17 @@
 //! let card = client.fetch_agent_card().await?;
 //!
 //! let message = Message {
-//!     id: uuid::Uuid::new_v4().to_string(),
+//!     message_id: uuid::Uuid::new_v4().to_string(),
 //!     role: Role::User,
-//!     parts: vec![Part::Text(TextPart { text: "Hello".to_string() })],
+//!     parts: vec![Part::text("Hello")],
 //!     context_id: None,
+//!     task_id: None,
+//!     extensions: vec![],
 //!     reference_task_ids: None,
 //!     metadata: None,
 //! };
 //!
-//! let task = client.send_message(message, None).await?;
+//! let response = client.send_message(message, None).await?;
 //! ```
 
 mod client;

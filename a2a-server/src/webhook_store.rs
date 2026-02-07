@@ -2,7 +2,7 @@
 //!
 //! Provides thread-safe storage for push notification webhook configurations.
 
-use a2a_core::TaskPushNotificationConfig;
+use a2a_core::PushNotificationConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -20,19 +20,14 @@ pub enum WebhookValidationError {
 /// Stored webhook configuration with ID
 #[derive(Debug, Clone)]
 pub struct StoredWebhookConfig {
-    /// Configuration ID
     pub config_id: String,
-    /// The webhook configuration
-    pub config: TaskPushNotificationConfig,
+    pub config: PushNotificationConfig,
 }
 
 /// Thread-safe in-memory webhook configuration store
-///
-/// Uses nested HashMaps for O(1) lookup: task_id -> config_id -> config
 #[derive(Clone)]
 pub struct WebhookStore {
-    /// Map of task_id -> (config_id -> config)
-    configs: Arc<RwLock<HashMap<String, HashMap<String, TaskPushNotificationConfig>>>>,
+    configs: Arc<RwLock<HashMap<String, HashMap<String, PushNotificationConfig>>>>,
 }
 
 impl Default for WebhookStore {
@@ -42,24 +37,18 @@ impl Default for WebhookStore {
 }
 
 impl WebhookStore {
-    /// Create a new empty webhook store
     pub fn new() -> Self {
         Self {
             configs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Set a webhook configuration for a task
-    ///
-    /// If a config with the same ID exists, it will be replaced.
-    /// Returns an error if the webhook URL is invalid.
     pub async fn set(
         &self,
         task_id: &str,
         config_id: &str,
-        config: TaskPushNotificationConfig,
+        config: PushNotificationConfig,
     ) -> Result<(), WebhookValidationError> {
-        // Validate the webhook URL
         let parsed = Url::parse(&config.url)
             .map_err(|e| WebhookValidationError::InvalidUrl(e.to_string()))?;
 
@@ -78,8 +67,7 @@ impl WebhookStore {
         Ok(())
     }
 
-    /// Get a specific webhook configuration (O(1) lookup)
-    pub async fn get(&self, task_id: &str, config_id: &str) -> Option<TaskPushNotificationConfig> {
+    pub async fn get(&self, task_id: &str, config_id: &str) -> Option<PushNotificationConfig> {
         self.configs
             .read()
             .await
@@ -88,7 +76,6 @@ impl WebhookStore {
             .cloned()
     }
 
-    /// List all webhook configurations for a task
     pub async fn list(&self, task_id: &str) -> Vec<StoredWebhookConfig> {
         let guard = self.configs.read().await;
         guard
@@ -105,14 +92,10 @@ impl WebhookStore {
             .unwrap_or_default()
     }
 
-    /// Delete a specific webhook configuration (O(1) lookup)
-    ///
-    /// Returns true if the config was found and deleted.
     pub async fn delete(&self, task_id: &str, config_id: &str) -> bool {
         let mut guard = self.configs.write().await;
         if let Some(configs) = guard.get_mut(task_id) {
             let removed = configs.remove(config_id).is_some();
-            // Clean up empty task entries
             if configs.is_empty() {
                 guard.remove(task_id);
             }
@@ -121,8 +104,7 @@ impl WebhookStore {
         false
     }
 
-    /// Get all webhook configurations for a task (for delivery)
-    pub async fn get_configs_for_task(&self, task_id: &str) -> Vec<TaskPushNotificationConfig> {
+    pub async fn get_configs_for_task(&self, task_id: &str) -> Vec<PushNotificationConfig> {
         let guard = self.configs.read().await;
         guard
             .get(task_id)
@@ -130,7 +112,6 @@ impl WebhookStore {
             .unwrap_or_default()
     }
 
-    /// Remove all configurations for a task
     pub async fn remove_task(&self, task_id: &str) {
         self.configs.write().await.remove(task_id);
     }
@@ -140,11 +121,12 @@ impl WebhookStore {
 mod tests {
     use super::*;
 
-    fn make_config(url: &str) -> TaskPushNotificationConfig {
-        TaskPushNotificationConfig {
+    fn make_config(url: &str) -> PushNotificationConfig {
+        PushNotificationConfig {
+            id: None,
             url: url.to_string(),
-            headers: None,
-            event_types: vec!["task_status_update".to_string()],
+            token: None,
+            authentication: None,
         }
     }
 
@@ -163,14 +145,8 @@ mod tests {
     #[tokio::test]
     async fn test_list() {
         let store = WebhookStore::new();
-        store
-            .set("task-1", "config-1", make_config("https://a.com"))
-            .await
-            .unwrap();
-        store
-            .set("task-1", "config-2", make_config("https://b.com"))
-            .await
-            .unwrap();
+        store.set("task-1", "config-1", make_config("https://a.com")).await.unwrap();
+        store.set("task-1", "config-2", make_config("https://b.com")).await.unwrap();
 
         let configs = store.list("task-1").await;
         assert_eq!(configs.len(), 2);
@@ -179,10 +155,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete() {
         let store = WebhookStore::new();
-        store
-            .set("task-1", "config-1", make_config("https://a.com"))
-            .await
-            .unwrap();
+        store.set("task-1", "config-1", make_config("https://a.com")).await.unwrap();
 
         assert!(store.delete("task-1", "config-1").await);
         assert!(store.get("task-1", "config-1").await.is_none());
@@ -192,14 +165,8 @@ mod tests {
     #[tokio::test]
     async fn test_replace_existing() {
         let store = WebhookStore::new();
-        store
-            .set("task-1", "config-1", make_config("https://old.com"))
-            .await
-            .unwrap();
-        store
-            .set("task-1", "config-1", make_config("https://new.com"))
-            .await
-            .unwrap();
+        store.set("task-1", "config-1", make_config("https://old.com")).await.unwrap();
+        store.set("task-1", "config-1", make_config("https://new.com")).await.unwrap();
 
         let configs = store.list("task-1").await;
         assert_eq!(configs.len(), 1);
@@ -226,7 +193,6 @@ mod tests {
     async fn test_concurrent_sets() {
         let store = Arc::new(WebhookStore::new());
 
-        // Spawn 100 concurrent sets across 10 tasks
         let handles: Vec<_> = (0..100)
             .map(|i| {
                 let store = store.clone();
@@ -245,7 +211,6 @@ mod tests {
             assert!(result.is_ok());
         }
 
-        // Each task should have 10 configs
         for i in 0..10 {
             let configs = store.list(&format!("task-{}", i)).await;
             assert_eq!(configs.len(), 10);
@@ -256,7 +221,6 @@ mod tests {
     async fn test_concurrent_reads_and_writes() {
         let store = Arc::new(WebhookStore::new());
 
-        // Pre-populate
         for i in 0..10 {
             store
                 .set("task-1", &format!("config-{}", i), make_config(&format!("https://pre{}.com", i)))
@@ -266,7 +230,6 @@ mod tests {
 
         let mut handles = Vec::new();
 
-        // Writers
         for i in 10..60 {
             let store = store.clone();
             handles.push(tokio::spawn(async move {
@@ -277,7 +240,6 @@ mod tests {
             }));
         }
 
-        // Readers
         for _ in 0..50 {
             let store = store.clone();
             handles.push(tokio::spawn(async move {
@@ -285,7 +247,6 @@ mod tests {
             }));
         }
 
-        // Deleters
         for i in 0..5 {
             let store = store.clone();
             handles.push(tokio::spawn(async move {
@@ -297,7 +258,6 @@ mod tests {
             h.await.unwrap();
         }
 
-        // Should have 55 configs (10 original - 5 deleted + 50 new)
         let configs = store.list("task-1").await;
         assert_eq!(configs.len(), 55);
     }

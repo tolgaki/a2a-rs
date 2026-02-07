@@ -25,7 +25,7 @@
 //!         &self,
 //!         message: Message,
 //!         auth: Option<AuthContext>,
-//!     ) -> HandlerResult<Task> {
+//!     ) -> HandlerResult<SendMessageResponse> {
 //!         // Process message with your backend
 //!         todo!()
 //!     }

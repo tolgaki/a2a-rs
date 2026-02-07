@@ -2,7 +2,7 @@
 //!
 //! Handles delivery of push notification events to registered webhooks.
 
-use a2a_core::{StreamEvent, TaskPushNotificationConfig};
+use a2a_core::{PushNotificationConfig, StreamEvent};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Semaphore};
@@ -10,19 +10,13 @@ use tracing::{debug, error, warn};
 
 use crate::webhook_store::WebhookStore;
 
-/// Default maximum concurrent webhook deliveries
 const DEFAULT_MAX_CONCURRENT: usize = 100;
 
-/// Retry configuration for webhook delivery
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
-    /// Maximum number of retry attempts
     pub max_retries: u32,
-    /// Initial delay between retries
     pub initial_delay: Duration,
-    /// Maximum delay between retries
     pub max_delay: Duration,
-    /// Backoff multiplier
     pub backoff_multiplier: f64,
 }
 
@@ -37,10 +31,6 @@ impl Default for RetryConfig {
     }
 }
 
-/// Webhook delivery engine
-///
-/// Listens to stream events and delivers them to registered webhooks.
-/// Uses a semaphore to limit concurrent deliveries and prevent resource exhaustion.
 pub struct WebhookDelivery {
     client: reqwest::Client,
     webhook_store: WebhookStore,
@@ -49,12 +39,10 @@ pub struct WebhookDelivery {
 }
 
 impl WebhookDelivery {
-    /// Create a new webhook delivery engine with default concurrency limit
     pub fn new(webhook_store: WebhookStore) -> Self {
         Self::with_config(webhook_store, RetryConfig::default(), DEFAULT_MAX_CONCURRENT)
     }
 
-    /// Create a new webhook delivery engine with custom retry config and concurrency limit
     pub fn with_config(
         webhook_store: WebhookStore,
         retry_config: RetryConfig,
@@ -73,9 +61,6 @@ impl WebhookDelivery {
         }
     }
 
-    /// Start the delivery loop
-    ///
-    /// This spawns a background task that listens for events and delivers them.
     pub fn start(self: Arc<Self>, mut event_rx: broadcast::Receiver<StreamEvent>) {
         tokio::spawn(async move {
             loop {
@@ -95,14 +80,12 @@ impl WebhookDelivery {
         });
     }
 
-    /// Handle a single event
     async fn handle_event(self: Arc<Self>, event: StreamEvent) {
         let task_id = match &event {
             StreamEvent::Task(t) => &t.id,
-            StreamEvent::TaskStatusUpdate(e) => &e.task_id,
-            StreamEvent::TaskArtifactUpdate(e) => &e.task_id,
-            StreamEvent::Message(_) => return, // Messages don't trigger webhooks
-            _ => return, // Unknown event types don't trigger webhooks
+            StreamEvent::StatusUpdate(e) => &e.task_id,
+            StreamEvent::ArtifactUpdate(e) => &e.task_id,
+            StreamEvent::Message(_) => return,
         };
 
         let configs = self.webhook_store.get_configs_for_task(task_id).await;
@@ -110,30 +93,13 @@ impl WebhookDelivery {
             return;
         }
 
-        let event_type = match &event {
-            StreamEvent::Task(_) => "task",
-            StreamEvent::TaskStatusUpdate(_) => "task_status_update",
-            StreamEvent::TaskArtifactUpdate(_) => "task_artifact_update",
-            StreamEvent::Message(_) => "message",
-            _ => "unknown",
-        };
-
         for config in configs {
-            // Check if this event type is in the filter
-            if !config.event_types.is_empty()
-                && !config.event_types.iter().any(|t| t == event_type || t == "*")
-            {
-                continue;
-            }
-
             let self_clone = self.clone();
             let event_clone = event.clone();
             let config_clone = config.clone();
             let semaphore = self.concurrency_limit.clone();
 
-            // Spawn delivery in background with bounded concurrency
             tokio::spawn(async move {
-                // Acquire permit before delivery - this limits concurrent deliveries
                 let _permit = match semaphore.acquire_owned().await {
                     Ok(permit) => permit,
                     Err(_) => {
@@ -146,20 +112,15 @@ impl WebhookDelivery {
                     .deliver_with_retry(&config_clone, &event_clone)
                     .await
                 {
-                    error!(
-                        "Failed to deliver webhook to {}: {}",
-                        config_clone.url, e
-                    );
+                    error!("Failed to deliver webhook to {}: {}", config_clone.url, e);
                 }
-                // Permit automatically released when dropped
             });
         }
     }
 
-    /// Deliver an event to a webhook with retry logic
     async fn deliver_with_retry(
         &self,
-        config: &TaskPushNotificationConfig,
+        config: &PushNotificationConfig,
         event: &StreamEvent,
     ) -> Result<(), WebhookError> {
         let payload =
@@ -170,10 +131,7 @@ impl WebhookDelivery {
 
         for attempt in 0..=self.retry_config.max_retries {
             if attempt > 0 {
-                debug!(
-                    "Retry attempt {} for webhook {}",
-                    attempt, config.url
-                );
+                debug!("Retry attempt {} for webhook {}", attempt, config.url);
                 tokio::time::sleep(delay).await;
                 delay = std::cmp::min(
                     Duration::from_secs_f64(delay.as_secs_f64() * self.retry_config.backoff_multiplier),
@@ -201,10 +159,9 @@ impl WebhookDelivery {
         Err(last_error.unwrap_or(WebhookError::Unknown))
     }
 
-    /// Send a single webhook request
     async fn send_request(
         &self,
-        config: &TaskPushNotificationConfig,
+        config: &PushNotificationConfig,
         payload: &str,
     ) -> Result<(), WebhookError> {
         let mut request = self
@@ -213,11 +170,18 @@ impl WebhookDelivery {
             .header("Content-Type", "application/json")
             .body(payload.to_string());
 
-        // Add custom headers if configured
-        if let Some(headers) = &config.headers {
-            for (key, value) in headers {
-                request = request.header(key.as_str(), value.as_str());
+        // Add authentication if configured
+        if let Some(auth) = &config.authentication {
+            match auth.scheme.as_str() {
+                "bearer" => {
+                    request = request.header("Authorization", format!("Bearer {}", auth.credentials));
+                }
+                _ => {
+                    request = request.header("Authorization", format!("{} {}", auth.scheme, auth.credentials));
+                }
             }
+        } else if let Some(token) = &config.token {
+            request = request.header("Authorization", format!("Bearer {}", token));
         }
 
         let response = request
@@ -236,7 +200,6 @@ impl WebhookDelivery {
     }
 }
 
-/// Webhook delivery error
 #[derive(Debug, thiserror::Error)]
 pub enum WebhookError {
     #[error("Serialization error: {0}")]

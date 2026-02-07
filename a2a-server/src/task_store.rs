@@ -150,8 +150,8 @@ impl TaskStore {
                         return false;
                     }
                 }
-                // Filter by last_updated_after (milliseconds since epoch)
-                if let Some(after_ms) = params.last_updated_after {
+                // Filter by status_timestamp_after (milliseconds since epoch)
+                if let Some(after_ms) = params.status_timestamp_after {
                     if let Some(ref ts) = task.status.timestamp {
                         // Parse ISO8601 timestamp and compare
                         if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
