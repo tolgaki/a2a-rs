@@ -111,7 +111,8 @@ async fn test_message_send_and_poll() {
 
     let rpc_response = response_json(response).await;
     assert!(rpc_response.error.is_none());
-    let polled_task: a2a_rs_core::Task = serde_json::from_value(rpc_response.result.unwrap()).unwrap();
+    let polled_task: a2a_rs_core::Task =
+        serde_json::from_value(rpc_response.result.unwrap()).unwrap();
     assert_eq!(polled_task.id, task_id);
 }
 
@@ -258,7 +259,10 @@ async fn test_echo_response_content() {
     let agent_msg = &history[1];
     assert_eq!(agent_msg.role, Role::Agent);
 
-    let text = agent_msg.parts[0].text.as_deref().expect("Expected text part");
+    let text = agent_msg.parts[0]
+        .text
+        .as_deref()
+        .expect("Expected text part");
     assert!(text.contains("echo:"));
     assert!(text.contains("Hello World"));
 }

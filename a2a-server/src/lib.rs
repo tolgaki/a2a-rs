@@ -53,10 +53,12 @@ mod webhook_delivery;
 mod webhook_store;
 
 // Re-export handler types
-pub use handler::{AuthContext, BoxedHandler, EchoHandler, HandlerError, HandlerResult, MessageHandler};
+pub use handler::{
+    AuthContext, BoxedHandler, EchoHandler, HandlerError, HandlerResult, MessageHandler,
+};
 
 // Re-export server types
-pub use server::{A2aServer, AppState, AuthExtractor, ServerConfig, run_echo_server, run_server};
+pub use server::{run_echo_server, run_server, A2aServer, AppState, AuthExtractor, ServerConfig};
 
 // Re-export task store
 pub use task_store::TaskStore;

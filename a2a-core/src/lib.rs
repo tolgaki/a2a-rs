@@ -602,7 +602,12 @@ pub fn success(id: serde_json::Value, result: serde_json::Value) -> JsonRpcRespo
     }
 }
 
-pub fn error(id: serde_json::Value, code: i32, message: &str, data: Option<serde_json::Value>) -> JsonRpcResponse {
+pub fn error(
+    id: serde_json::Value,
+    code: i32,
+    message: &str,
+    data: Option<serde_json::Value>,
+) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0".to_string(),
         id,
@@ -1039,8 +1044,14 @@ mod tests {
         let part = Part::url("https://example.com/file.pdf", "application/pdf");
         let json = serde_json::to_string(&part).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value.get("url").unwrap().as_str().unwrap(), "https://example.com/file.pdf");
-        assert_eq!(value.get("mediaType").unwrap().as_str().unwrap(), "application/pdf");
+        assert_eq!(
+            value.get("url").unwrap().as_str().unwrap(),
+            "https://example.com/file.pdf"
+        );
+        assert_eq!(
+            value.get("mediaType").unwrap().as_str().unwrap(),
+            "application/pdf"
+        );
     }
 
     #[test]
@@ -1063,11 +1074,14 @@ mod tests {
             capabilities: AgentCapabilities::default(),
             security_schemes: {
                 let mut m = HashMap::new();
-                m.insert("apiKey".to_string(), SecurityScheme::ApiKeySecurityScheme(ApiKeySecurityScheme {
-                    name: "X-API-Key".to_string(),
-                    location: "header".to_string(),
-                    description: None,
-                }));
+                m.insert(
+                    "apiKey".to_string(),
+                    SecurityScheme::ApiKeySecurityScheme(ApiKeySecurityScheme {
+                        name: "X-API-Key".to_string(),
+                        location: "header".to_string(),
+                        description: None,
+                    }),
+                );
                 m
             },
             security_requirements: vec![],
@@ -1102,9 +1116,18 @@ mod tests {
     fn error_codes() {
         use errors::*;
         assert_eq!(message_for_code(TASK_NOT_FOUND), "Task not found");
-        assert_eq!(message_for_code(VERSION_NOT_SUPPORTED), "Protocol version not supported");
-        assert_eq!(message_for_code(INVALID_AGENT_RESPONSE), "Invalid agent response");
-        assert_eq!(message_for_code(EXTENSION_SUPPORT_REQUIRED), "Extension support required");
+        assert_eq!(
+            message_for_code(VERSION_NOT_SUPPORTED),
+            "Protocol version not supported"
+        );
+        assert_eq!(
+            message_for_code(INVALID_AGENT_RESPONSE),
+            "Invalid agent response"
+        );
+        assert_eq!(
+            message_for_code(EXTENSION_SUPPORT_REQUIRED),
+            "Extension support required"
+        );
         assert_eq!(message_for_code(999), "Unknown error");
     }
 
