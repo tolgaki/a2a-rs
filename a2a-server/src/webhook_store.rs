@@ -135,7 +135,10 @@ mod tests {
         let store = WebhookStore::new();
         let config = make_config("https://example.com/webhook");
 
-        store.set("task-1", "config-1", config.clone()).await.unwrap();
+        store
+            .set("task-1", "config-1", config.clone())
+            .await
+            .unwrap();
 
         let retrieved = store.get("task-1", "config-1").await;
         assert!(retrieved.is_some());
@@ -145,8 +148,14 @@ mod tests {
     #[tokio::test]
     async fn test_list() {
         let store = WebhookStore::new();
-        store.set("task-1", "config-1", make_config("https://a.com")).await.unwrap();
-        store.set("task-1", "config-2", make_config("https://b.com")).await.unwrap();
+        store
+            .set("task-1", "config-1", make_config("https://a.com"))
+            .await
+            .unwrap();
+        store
+            .set("task-1", "config-2", make_config("https://b.com"))
+            .await
+            .unwrap();
 
         let configs = store.list("task-1").await;
         assert_eq!(configs.len(), 2);
@@ -155,7 +164,10 @@ mod tests {
     #[tokio::test]
     async fn test_delete() {
         let store = WebhookStore::new();
-        store.set("task-1", "config-1", make_config("https://a.com")).await.unwrap();
+        store
+            .set("task-1", "config-1", make_config("https://a.com"))
+            .await
+            .unwrap();
 
         assert!(store.delete("task-1", "config-1").await);
         assert!(store.get("task-1", "config-1").await.is_none());
@@ -165,8 +177,14 @@ mod tests {
     #[tokio::test]
     async fn test_replace_existing() {
         let store = WebhookStore::new();
-        store.set("task-1", "config-1", make_config("https://old.com")).await.unwrap();
-        store.set("task-1", "config-1", make_config("https://new.com")).await.unwrap();
+        store
+            .set("task-1", "config-1", make_config("https://old.com"))
+            .await
+            .unwrap();
+        store
+            .set("task-1", "config-1", make_config("https://new.com"))
+            .await
+            .unwrap();
 
         let configs = store.list("task-1").await;
         assert_eq!(configs.len(), 1);
@@ -186,7 +204,10 @@ mod tests {
         let store = WebhookStore::new();
         let config = make_config("ftp://example.com/webhook");
         let result = store.set("task-1", "config-1", config).await;
-        assert!(matches!(result, Err(WebhookValidationError::InvalidScheme(_))));
+        assert!(matches!(
+            result,
+            Err(WebhookValidationError::InvalidScheme(_))
+        ));
     }
 
     #[tokio::test]
@@ -200,7 +221,11 @@ mod tests {
                     let task_id = format!("task-{}", i % 10);
                     let config_id = format!("config-{}", i);
                     store
-                        .set(&task_id, &config_id, make_config(&format!("https://example{}.com", i)))
+                        .set(
+                            &task_id,
+                            &config_id,
+                            make_config(&format!("https://example{}.com", i)),
+                        )
                         .await
                 })
             })
@@ -223,7 +248,11 @@ mod tests {
 
         for i in 0..10 {
             store
-                .set("task-1", &format!("config-{}", i), make_config(&format!("https://pre{}.com", i)))
+                .set(
+                    "task-1",
+                    &format!("config-{}", i),
+                    make_config(&format!("https://pre{}.com", i)),
+                )
                 .await
                 .unwrap();
         }
@@ -234,7 +263,11 @@ mod tests {
             let store = store.clone();
             handles.push(tokio::spawn(async move {
                 store
-                    .set("task-1", &format!("config-{}", i), make_config(&format!("https://new{}.com", i)))
+                    .set(
+                        "task-1",
+                        &format!("config-{}", i),
+                        make_config(&format!("https://new{}.com", i)),
+                    )
                     .await
                     .unwrap();
             }));

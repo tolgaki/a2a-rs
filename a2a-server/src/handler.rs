@@ -103,11 +103,7 @@ pub trait MessageHandler: Send + Sync {
     }
 
     /// Optional: Return an extended agent card for authenticated requests
-    async fn extended_agent_card(
-        &self,
-        _base_url: &str,
-        _auth: &AuthContext,
-    ) -> Option<AgentCard> {
+    async fn extended_agent_card(&self, _base_url: &str, _auth: &AuthContext) -> Option<AgentCard> {
         None
     }
 }
@@ -173,7 +169,9 @@ impl MessageHandler for EchoHandler {
     }
 
     fn agent_card(&self, base_url: &str) -> AgentCard {
-        use a2a_rs_core::{AgentCapabilities, AgentInterface, AgentProvider, AgentSkill, PROTOCOL_VERSION};
+        use a2a_rs_core::{
+            AgentCapabilities, AgentInterface, AgentProvider, AgentSkill, PROTOCOL_VERSION,
+        };
 
         AgentCard {
             name: self.agent_name.clone(),

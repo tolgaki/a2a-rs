@@ -120,7 +120,11 @@ impl A2aServer {
     }
 
     pub fn build_router(self) -> Router {
-        let bind: SocketAddr = self.config.bind_address.parse().expect("Invalid bind address");
+        let bind: SocketAddr = self
+            .config
+            .bind_address
+            .parse()
+            .expect("Invalid bind address");
         let base_url = format!("http://{}", bind);
         let card = Arc::new(self.handler.agent_card(&base_url));
 
@@ -144,7 +148,10 @@ impl A2aServer {
             );
 
         let sse_routes = Router::new()
-            .route("/v1/tasks/:task_id/subscribe", get(handle_task_subscribe_sse))
+            .route(
+                "/v1/tasks/:task_id/subscribe",
+                get(handle_task_subscribe_sse),
+            )
             .route("/v1/message/stream", post(handle_message_stream_sse));
 
         let mut router = timed_routes.merge(sse_routes);
@@ -297,7 +304,10 @@ fn apply_history_length(task: &mut Task, history_length: Option<u32>) {
 
 // ============ Version Validation ============
 
-fn validate_a2a_version(headers: &HeaderMap, req_id: &serde_json::Value) -> Result<(), (StatusCode, Json<JsonRpcResponse>)> {
+fn validate_a2a_version(
+    headers: &HeaderMap,
+    req_id: &serde_json::Value,
+) -> Result<(), (StatusCode, Json<JsonRpcResponse>)> {
     if let Some(version_header) = headers.get(A2A_VERSION_HEADER) {
         let version_str = version_header.to_str().unwrap_or("");
 
@@ -336,7 +346,10 @@ fn validate_a2a_version(headers: &HeaderMap, req_id: &serde_json::Value) -> Resu
             Json(error(
                 req_id.clone(),
                 errors::VERSION_NOT_SUPPORTED,
-                &format!("Invalid version format: {}. Expected major.minor (e.g., '1.0')", version_str),
+                &format!(
+                    "Invalid version format: {}. Expected major.minor (e.g., '1.0')",
+                    version_str
+                ),
                 None,
             )),
         ));
@@ -369,7 +382,10 @@ pub fn rpc_error_with_data(
 }
 
 #[allow(dead_code)]
-pub fn rpc_success(id: serde_json::Value, result: serde_json::Value) -> (StatusCode, Json<JsonRpcResponse>) {
+pub fn rpc_success(
+    id: serde_json::Value,
+    result: serde_json::Value,
+) -> (StatusCode, Json<JsonRpcResponse>) {
     (StatusCode::OK, Json(success(id, result)))
 }
 
@@ -469,9 +485,7 @@ async fn handle_rpc(
         "tasks/pushNotificationConfig/get" => handle_push_config_get(state, req).await,
         "tasks/pushNotificationConfig/list" => handle_push_config_list(state, req).await,
         "tasks/pushNotificationConfig/delete" => handle_push_config_delete(state, req).await,
-        "agentCard/getExtended" => {
-            handle_get_extended_agent_card(state, req, auth_context).await
-        }
+        "agentCard/getExtended" => handle_get_extended_agent_card(state, req, auth_context).await,
         _ => (
             StatusCode::NOT_FOUND,
             Json(error(
@@ -488,8 +502,12 @@ fn handler_error_to_rpc(e: &HandlerError) -> (i32, StatusCode) {
     match e {
         HandlerError::InvalidInput(_) => (errors::INVALID_PARAMS, StatusCode::BAD_REQUEST),
         HandlerError::AuthRequired(_) => (errors::INVALID_REQUEST, StatusCode::UNAUTHORIZED),
-        HandlerError::BackendUnavailable { .. } => (errors::INTERNAL_ERROR, StatusCode::SERVICE_UNAVAILABLE),
-        HandlerError::ProcessingFailed { .. } => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
+        HandlerError::BackendUnavailable { .. } => {
+            (errors::INTERNAL_ERROR, StatusCode::SERVICE_UNAVAILABLE)
+        }
+        HandlerError::ProcessingFailed { .. } => {
+            (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR)
+        }
         HandlerError::Internal(_) => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
@@ -524,12 +542,13 @@ async fn handle_message_send(
         .as_ref()
         .and_then(|c| c.blocking)
         .unwrap_or(false);
-    let history_length = params
-        .configuration
-        .as_ref()
-        .and_then(|c| c.history_length);
+    let history_length = params.configuration.as_ref().and_then(|c| c.history_length);
 
-    match state.handler.handle_message(params.message, auth_context).await {
+    match state
+        .handler
+        .handle_message(params.message, auth_context)
+        .await
+    {
         Ok(response) => {
             match response {
                 SendMessageResponse::Task(mut task) => {
@@ -670,7 +689,8 @@ async fn handle_message_stream_sse(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(params): Json<SendMessageRequest>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<JsonRpcResponse>)> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<JsonRpcResponse>)>
+{
     if !state.streaming_enabled() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -694,7 +714,10 @@ async fn handle_message_stream_sse(
         .await
         .map_err(|e| {
             let (code, status) = handler_error_to_rpc(&e);
-            (status, Json(error(serde_json::Value::Null, code, &e.to_string(), None)))
+            (
+                status,
+                Json(error(serde_json::Value::Null, code, &e.to_string(), None)),
+            )
         })?;
 
     // Extract task from response (streaming only works with tasks)
@@ -773,34 +796,36 @@ async fn handle_tasks_get(
     state: AppState,
     req: JsonRpcRequest,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
-    let params: Result<GetTaskRequest, _> =
-        serde_json::from_value(req.params.unwrap_or_default());
+    let params: Result<GetTaskRequest, _> = serde_json::from_value(req.params.unwrap_or_default());
 
     match params {
-        Ok(p) => {
-            match state.task_store.get_flexible(&p.id).await {
-                Some(mut task) => {
-                    apply_history_length(&mut task, p.history_length);
+        Ok(p) => match state.task_store.get_flexible(&p.id).await {
+            Some(mut task) => {
+                apply_history_length(&mut task, p.history_length);
 
-                    match serde_json::to_value(task) {
-                        Ok(val) => (StatusCode::OK, Json(success(req.id, val))),
-                        Err(e) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(error(
-                                req.id,
-                                errors::INTERNAL_ERROR,
-                                "serialization failed",
-                                Some(serde_json::json!({"error": e.to_string()})),
-                            )),
-                        ),
-                    }
+                match serde_json::to_value(task) {
+                    Ok(val) => (StatusCode::OK, Json(success(req.id, val))),
+                    Err(e) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(error(
+                            req.id,
+                            errors::INTERNAL_ERROR,
+                            "serialization failed",
+                            Some(serde_json::json!({"error": e.to_string()})),
+                        )),
+                    ),
                 }
-                None => (
-                    StatusCode::NOT_FOUND,
-                    Json(error(req.id, errors::TASK_NOT_FOUND, "task not found", None)),
-                ),
             }
-        }
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(error(
+                    req.id,
+                    errors::TASK_NOT_FOUND,
+                    "task not found",
+                    None,
+                )),
+            ),
+        },
         Err(err) => (
             StatusCode::BAD_REQUEST,
             Json(error(
@@ -866,7 +891,12 @@ async fn handle_tasks_cancel(
                 ),
                 None => (
                     StatusCode::NOT_FOUND,
-                    Json(error(req.id, errors::TASK_NOT_FOUND, "task not found", None)),
+                    Json(error(
+                        req.id,
+                        errors::TASK_NOT_FOUND,
+                        "task not found",
+                        None,
+                    )),
                 ),
             }
         }
@@ -929,7 +959,12 @@ async fn handle_tasks_subscribe(
             if state.task_store.get_flexible(&p.id).await.is_none() {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(error(req.id, errors::TASK_NOT_FOUND, "task not found", None)),
+                    Json(error(
+                        req.id,
+                        errors::TASK_NOT_FOUND,
+                        "task not found",
+                        None,
+                    )),
                 );
             }
 
@@ -1029,7 +1064,12 @@ async fn handle_push_config_create(
             if state.task_store.get_flexible(&p.task_id).await.is_none() {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(error(req.id, errors::TASK_NOT_FOUND, "task not found", None)),
+                    Json(error(
+                        req.id,
+                        errors::TASK_NOT_FOUND,
+                        "task not found",
+                        None,
+                    )),
                 );
             }
 
@@ -1087,24 +1127,27 @@ async fn handle_push_config_get(
         serde_json::from_value(req.params.unwrap_or_default());
 
     match params {
-        Ok(p) => {
-            match state.webhook_store.get(&p.task_id, &p.id).await {
-                Some(config) => (
-                    StatusCode::OK,
-                    Json(success(
-                        req.id,
-                        serde_json::json!({
-                            "configId": p.id,
-                            "config": config
-                        }),
-                    )),
-                ),
-                None => (
-                    StatusCode::NOT_FOUND,
-                    Json(error(req.id, errors::TASK_NOT_FOUND, "push notification config not found", None)),
-                ),
-            }
-        }
+        Ok(p) => match state.webhook_store.get(&p.task_id, &p.id).await {
+            Some(config) => (
+                StatusCode::OK,
+                Json(success(
+                    req.id,
+                    serde_json::json!({
+                        "configId": p.id,
+                        "config": config
+                    }),
+                )),
+            ),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(error(
+                    req.id,
+                    errors::TASK_NOT_FOUND,
+                    "push notification config not found",
+                    None,
+                )),
+            ),
+        },
         Err(err) => (
             StatusCode::BAD_REQUEST,
             Json(error(
@@ -1199,7 +1242,12 @@ async fn handle_push_config_delete(
             } else {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(error(req.id, errors::TASK_NOT_FOUND, "push notification config not found", None)),
+                    Json(error(
+                        req.id,
+                        errors::TASK_NOT_FOUND,
+                        "push notification config not found",
+                        None,
+                    )),
                 )
             }
         }

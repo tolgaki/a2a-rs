@@ -40,7 +40,11 @@ pub struct WebhookDelivery {
 
 impl WebhookDelivery {
     pub fn new(webhook_store: WebhookStore) -> Self {
-        Self::with_config(webhook_store, RetryConfig::default(), DEFAULT_MAX_CONCURRENT)
+        Self::with_config(
+            webhook_store,
+            RetryConfig::default(),
+            DEFAULT_MAX_CONCURRENT,
+        )
     }
 
     pub fn with_config(
@@ -134,7 +138,9 @@ impl WebhookDelivery {
                 debug!("Retry attempt {} for webhook {}", attempt, config.url);
                 tokio::time::sleep(delay).await;
                 delay = std::cmp::min(
-                    Duration::from_secs_f64(delay.as_secs_f64() * self.retry_config.backoff_multiplier),
+                    Duration::from_secs_f64(
+                        delay.as_secs_f64() * self.retry_config.backoff_multiplier,
+                    ),
                     self.retry_config.max_delay,
                 );
             }
@@ -175,10 +181,12 @@ impl WebhookDelivery {
             if let Some(credentials) = &auth.credentials {
                 match auth.scheme.as_str() {
                     "bearer" => {
-                        request = request.header("Authorization", format!("Bearer {}", credentials));
+                        request =
+                            request.header("Authorization", format!("Bearer {}", credentials));
                     }
                     _ => {
-                        request = request.header("Authorization", format!("{} {}", auth.scheme, credentials));
+                        request = request
+                            .header("Authorization", format!("{} {}", auth.scheme, credentials));
                     }
                 }
             }

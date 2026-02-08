@@ -2,7 +2,7 @@
 //!
 //! Provides thread-safe storage for A2A tasks.
 
-use a2a_rs_core::{Task, ListTasksRequest, TaskListResponse};
+use a2a_rs_core::{ListTasksRequest, Task, TaskListResponse};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -43,7 +43,7 @@ impl TaskStore {
     /// Tries: exact match, with "tasks/" prefix, without "tasks/" prefix
     pub async fn get_flexible(&self, id: &str) -> Option<Task> {
         let guard = self.tasks.read().await;
-        
+
         // Try exact match
         if let Some(task) = guard.get(id) {
             return Some(task.clone());
@@ -255,9 +255,9 @@ mod tests {
     async fn test_insert_and_get() {
         let store = TaskStore::new();
         let task = make_task("task-1");
-        
+
         store.insert(task.clone()).await;
-        
+
         let retrieved = store.get("task-1").await;
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().id, "task-1");
@@ -267,12 +267,12 @@ mod tests {
     async fn test_get_flexible() {
         let store = TaskStore::new();
         let task = make_task("tasks/abc-123");
-        
+
         store.insert(task).await;
-        
+
         // Exact match
         assert!(store.get_flexible("tasks/abc-123").await.is_some());
-        
+
         // Without prefix
         assert!(store.get_flexible("abc-123").await.is_some());
     }

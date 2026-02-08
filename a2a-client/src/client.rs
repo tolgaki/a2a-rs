@@ -249,12 +249,8 @@ impl A2aClient {
             req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
         }
 
-        let mut resp: JsonRpcResponse = req_builder
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let mut resp: JsonRpcResponse =
+            req_builder.send().await?.error_for_status()?.json().await?;
 
         if let Some(err) = resp.error.take() {
             anyhow::bail!("Server error {}: {}", err.code, err.message);
@@ -279,7 +275,8 @@ impl A2aClient {
             configuration: None,
             metadata: None,
         };
-        self.json_rpc_call("message/send", params, session_token).await
+        self.json_rpc_call("message/send", params, session_token)
+            .await
     }
 
     /// Poll a task by ID
@@ -481,9 +478,13 @@ mod tests {
         let challenge = generate_code_challenge(&verifier);
 
         // Verifier should be URL-safe base64
-        assert!(verifier.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(verifier
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
         // Challenge should also be URL-safe base64
-        assert!(challenge.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(challenge
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     }
 
     #[test]
