@@ -13,7 +13,7 @@ Thank you for your interest in contributing to the A2A Rust libraries! This docu
 
 ```bash
 # Clone the repository
-git clone https://github.com/tkellogg/a2a-rs.git
+git clone https://github.com/tolgaki/a2a-rs.git
 cd a2a-rs
 
 # Build all crates
