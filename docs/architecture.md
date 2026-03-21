@@ -11,9 +11,10 @@ This document describes the architecture of the A2A Rust libraries.
                     |                           |
                     v                           v
 +-----------------------------+   +-----------------------------+
-|        a2a-rs-client           |   |        a2a-rs-server           |
+|        a2a-rs-client        |   |        a2a-rs-server        |
 |  - Agent discovery          |   |  - MessageHandler trait     |
 |  - Message sending          |   |  - A2aServer builder        |
+|  - Streaming (SSE)          |   |  - Streaming (SSE)          |
 |  - Task polling             |   |  - TaskStore                |
 |  - OAuth PKCE support       |   |  - Auth extractors          |
 +-----------------------------+   +-----------------------------+
@@ -21,11 +22,12 @@ This document describes the architecture of the A2A Rust libraries.
                     +-------------+-------------+
                                   v
                     +-----------------------------+
-                    |         a2a-rs-core            |
-                    |  - A2A RC 1.0 types         |
-                    |  - Security schemes         |
-                    |  - JSON-RPC definitions     |
-                    |  - Helper functions         |
+                    |         a2a-rs-core          |
+                    |  - A2A types (Part, Task,    |
+                    |    Message, AgentCard, etc.) |
+                    |  - Security schemes          |
+                    |  - JSON-RPC definitions      |
+                    |  - Helper functions           |
                     +-----------------------------+
 ```
 
@@ -33,7 +35,7 @@ This document describes the architecture of the A2A Rust libraries.
 
 ### a2a-rs-core
 
-**Purpose**: Shared types and definitions for the A2A RC 1.0 specification.
+**Purpose**: Shared types and definitions for the A2A protocol.
 
 **Key Components**:
 
@@ -41,13 +43,18 @@ This document describes the architecture of the A2A Rust libraries.
 |-----------|-------------|
 | `AgentCard` | Agent metadata including name, description, interfaces, capabilities, and security schemes |
 | `AgentInterface` | Transport endpoint with `protocol_binding` (e.g., "JSONRPC") and URL |
-| `Task` | Represents an A2A task with state, messages, and artifacts |
-| `Message` | User or agent message containing parts (uses `message_id`, not `id`) |
-| `Part` | Flat struct with optional fields: `text`, `raw`, `url`, `data`, `metadata`, `filename`, `media_type` |
-| `TaskState` | Enum: `Submitted`, `Working`, `InputRequired`, `Completed`, `Canceled`, `Failed`, `Rejected`, `AuthRequired` |
+| `Task` | Represents an A2A task with `kind: "task"`, state, messages, and artifacts |
+| `Message` | User or agent message with `kind: "message"` containing parts |
+| `Part` | Internally tagged enum (`kind` discriminator): `Text`, `File`, `Data` |
+| `FileContent` | File data for `Part::File` — `bytes` (base64), `uri`, `name`, `mime_type` |
+| `TaskState` | Enum: `submitted`, `working`, `input-required`, `completed`, `canceled`, `failed`, `rejected`, `auth-required` |
 | `SecurityScheme` | Externally tagged enum: `ApiKeySecurityScheme`, `HttpAuthSecurityScheme`, `Oauth2SecurityScheme`, `OpenIdConnectSecurityScheme`, `MtlsSecurityScheme` |
-| `SendMessageResponse` | Externally tagged enum: `Task` or `Message` |
-| `StreamResponse` | Externally tagged enum: `Task`, `Message`, `StatusUpdate`, `ArtifactUpdate` |
+| `SendMessageResponse` | Externally tagged enum (handler-internal): `Task` or `Message` |
+| `SendMessageResult` | Untagged enum (wire format): bare Task or Message in JSON-RPC result field |
+| `StreamResponse` | Externally tagged enum (server-internal broadcast): `Task`, `Message`, `StatusUpdate`, `ArtifactUpdate` |
+| `StreamingMessageResult` | Untagged enum (SSE wire format): `Task`, `Message`, `TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent` |
+| `TaskStatusUpdateEvent` | Streaming event with `kind: "status-update"`, `is_final` flag |
+| `TaskArtifactUpdateEvent` | Streaming event with `kind: "artifact-update"` |
 | `JsonRpcRequest/Response` | JSON-RPC 2.0 message types |
 
 **Helper Functions**:
@@ -61,11 +68,15 @@ This document describes the architecture of the A2A Rust libraries.
 | `success(id, result)` | Build successful JSON-RPC response |
 | `error(id, code, message, data)` | Build error JSON-RPC response |
 
-**Files**:
-```
-a2a-rs-core/src/
-└── lib.rs          # All type definitions and helpers
-```
+**Part constructors**:
+
+| Constructor | Wire format |
+|-------------|-------------|
+| `Part::text("hello")` | `{"kind":"text","text":"hello"}` |
+| `Part::file_uri(url, mime)` | `{"kind":"file","file":{"uri":"...","mimeType":"..."}}` |
+| `Part::file_bytes(b64, mime)` | `{"kind":"file","file":{"bytes":"...","mimeType":"..."}}` |
+| `Part::data(json_value)` | `{"kind":"data","data":{...}}` |
+| `part.as_text()` | Returns `Option<&str>` for text parts |
 
 ---
 
@@ -88,10 +99,6 @@ a2a-rs-core/src/
 **MessageHandler Trait**:
 
 ```rust
-use a2a_rs_server::{MessageHandler, HandlerResult, AuthContext};
-use a2a_rs_core::{AgentCard, Message, SendMessageResponse};
-use async_trait::async_trait;
-
 #[async_trait]
 pub trait MessageHandler: Send + Sync {
     /// Process a message and return a Task or Message
@@ -105,64 +112,14 @@ pub trait MessageHandler: Send + Sync {
     fn agent_card(&self, base_url: &str) -> AgentCard;
 
     /// Optional: Handle task cancellation (default: no-op)
-    async fn cancel_task(&self, task_id: &str) -> HandlerResult<()> {
-        Ok(())
-    }
+    async fn cancel_task(&self, task_id: &str) -> HandlerResult<()>;
 
     /// Optional: Check if handler supports streaming (default: false)
-    fn supports_streaming(&self) -> bool {
-        false
-    }
+    fn supports_streaming(&self) -> bool;
+
+    /// Optional: Return extended agent card for authenticated requests
+    async fn extended_agent_card(&self, base_url: &str, auth: &AuthContext) -> Option<AgentCard>;
 }
-```
-
-**A2aServer Builder**:
-
-```rust
-use a2a_rs_server::{A2aServer, AuthContext};
-
-// Minimal server with echo handler
-A2aServer::echo()
-    .bind("0.0.0.0:8080")
-    .run()
-    .await?;
-
-// Full configuration
-A2aServer::new(my_handler)
-    .bind("0.0.0.0:8080")
-    .task_store(custom_store)
-    .auth_extractor(|headers| {
-        let token = headers.get("authorization")?.to_str().ok()?;
-        Some(AuthContext {
-            user_id: "user-123".to_string(),
-            access_token: token.to_string(),
-            metadata: None,
-        })
-    })
-    .additional_routes(custom_router)
-    .run()
-    .await?;
-```
-
-**HandlerError Variants**:
-
-| Variant | Description |
-|---------|-------------|
-| `ProcessingFailed { message, source }` | Message processing failed |
-| `BackendUnavailable { message, source }` | Backend service unavailable |
-| `AuthRequired(String)` | Authentication required |
-| `InvalidInput(String)` | Invalid input parameters |
-| `Internal(anyhow::Error)` | Internal error |
-
-**Files**:
-```
-a2a-rs-server/src/
-├── lib.rs              # Re-exports
-├── handler.rs          # MessageHandler trait, AuthContext, EchoHandler
-├── server.rs           # A2aServer builder and HTTP routing
-├── task_store.rs       # Thread-safe task storage
-├── webhook_delivery.rs # Push notification delivery
-└── webhook_store.rs    # Webhook configuration storage
 ```
 
 **HTTP Endpoints**:
@@ -171,7 +128,19 @@ a2a-rs-server/src/
 |----------|--------|-------------|
 | `/health` | GET | Health check |
 | `/.well-known/agent-card.json` | GET | Agent card discovery |
-| `/v1/rpc` | POST | JSON-RPC endpoint (all methods) |
+| `/v1/rpc` | POST | JSON-RPC endpoint (all methods including streaming) |
+| `/v1/tasks/:task_id/subscribe` | GET | SSE subscription for task updates |
+
+**Streaming Architecture**:
+
+The server uses a `broadcast::Sender<StreamResponse>` channel for event distribution:
+
+1. Handler returns initial `SendMessageResponse::Task` from `handle_message()`
+2. Server stores the task and broadcasts it
+3. For `message/stream` requests, the server returns an SSE response
+4. Background code pushes updates via `server.get_event_sender()`
+5. SSE handler filters events by task ID and wraps each in a JSON-RPC envelope
+6. Stream ends on `is_final: true` or terminal task state
 
 ---
 
@@ -187,16 +156,10 @@ a2a-rs-server/src/
 | `ClientConfig` | Configuration: server URL, polling, OAuth |
 | `OAuthConfig` | OAuth PKCE flow configuration |
 | `fetch_agent_card()` | Fetches and caches Agent Cards (5-minute TTL) |
-| `send_message()` | Sends JSON-RPC `message/send` requests, returns `SendMessageResponse` |
+| `send_message()` | Sends `message/send`, returns `SendMessageResult` (Task or Message) |
+| `send_message_streaming()` | Sends `message/stream`, returns `Stream<Item = Result<StreamingMessageResult>>` |
 | `poll_task()` | Polls for task status by ID |
 | `poll_until_complete()` | Polls until terminal state or max attempts |
-
-**Files**:
-```
-a2a-rs-client/src/
-├── lib.rs          # Re-exports
-└── client.rs       # A2aClient implementation
-```
 
 ---
 
@@ -210,40 +173,52 @@ Client                          Server                          Handler
   |  POST /v1/rpc                 |                               |
   |  {"method":"message/send"}    |                               |
   |------------------------------>|                               |
-  |                               |                               |
-  |                               |  Extract auth from headers    |
-  |                               |                               |
   |                               |  handle_message(msg, auth)    |
   |                               |------------------------------>|
-  |                               |                               |
-  |                               |      Process with backend     |
   |                               |                               |
   |                               |  SendMessageResponse::Task    |
   |                               |<------------------------------|
   |                               |                               |
   |                               |  task_store.insert(task)      |
   |                               |                               |
-  |  {"result": {"task": {...}}}  |                               |
+  |  {"jsonrpc":"2.0","id":1,     |                               |
+  |   "result":{"kind":"task",..}}|                               |
   |<------------------------------|                               |
 ```
 
-### Task Polling Flow
+### Streaming Flow
 
 ```
-Client                          Server
-  |                               |
-  |  POST /v1/rpc                 |
-  |  {"method":"tasks/get",       |
-  |   "params":{"id":"abc-123"}}  |
-  |------------------------------>|
-  |                               |
-  |                               |  task_store.get(id)
-  |                               |
-  |  {"result": task}             |
-  |<------------------------------|
-  |                               |
-  |  (if not terminal, repeat)    |
-  |                               |
+Client                          Server                          Handler
+  |                               |                               |
+  |  POST /v1/rpc                 |                               |
+  |  {"method":"message/stream"}  |                               |
+  |------------------------------>|                               |
+  |                               |  handle_message(msg, auth)    |
+  |                               |------------------------------>|
+  |                               |  SendMessageResponse::Task    |
+  |                               |<------------------------------|
+  |                               |                               |
+  |  Content-Type: text/event-stream                              |
+  |<------------------------------|                               |
+  |                               |                               |
+  |  data: {"jsonrpc":"2.0",      |                               |
+  |   "result":{"kind":"task"..}} |  (initial task)               |
+  |<------------------------------|                               |
+  |                               |                               |
+  |                               |  broadcast_event(StatusUpdate)|
+  |  data: {"jsonrpc":"2.0",      |  (from background processing)|
+  |   "result":{"kind":           |                               |
+  |    "status-update",...}}       |                               |
+  |<------------------------------|                               |
+  |                               |                               |
+  |  data: {"jsonrpc":"2.0",      |                               |
+  |   "result":{"kind":           |  broadcast_event(StatusUpdate |
+  |    "status-update",           |    { is_final: true })        |
+  |    "final":true,...}}          |                               |
+  |<------------------------------|                               |
+  |                               |                               |
+  |  (stream ends)                |                               |
 ```
 
 ---
@@ -256,6 +231,7 @@ All components are designed for concurrent access:
 - `MessageHandler` requires `Send + Sync`
 - `A2aClient` is `Clone` and thread-safe
 - Server handles multiple concurrent requests via Tokio
+- Broadcast channel supports multiple concurrent SSE subscribers
 
 ---
 
@@ -263,27 +239,27 @@ All components are designed for concurrent access:
 
 ```
                     +--------------+
-                    | UNSPECIFIED  |
+                    | unspecified  |
                     +------+-------+
                            |
                            v
                     +--------------+
-            +-------|  SUBMITTED   |--------+
-            |       +------+-------+        |
-            |              |                |
-            |              v                |
-            |       +--------------+        |
-            |   +---|   WORKING    |----+   |
-            |   |   +------+-------+    |   |
-            |   |          |            |   |
-            |   |          v            |   |
-            |   |   +--------------+    |   |
-            |   |   |INPUT_REQUIRED|--+-+---+
-            |   |   +--------------+    |   |
-            |   |                       |   |
-            v   v                       v   v
+            +-------| submitted   |--------+
+            |       +------+-------+       |
+            |              |               |
+            |              v               |
+            |       +--------------+       |
+            |   +---| working      |---+   |
+            |   |   +------+-------+   |   |
+            |   |          |           |   |
+            |   |          v           |   |
+            |   |   +----------------+ |   |
+            |   |   |input-required  |-+---+
+            |   |   +----------------+ |   |
+            |   |                      |   |
+            v   v                      v   v
      +----------+  +----------+  +----------+  +----------+
-     |COMPLETED |  |  FAILED  |  | CANCELED |  | REJECTED |
+     |completed |  | failed   |  | canceled |  | rejected |
      +----------+  +----------+  +----------+  +----------+
          |              |              |              |
          +--------------+--------------+--------------+
@@ -292,10 +268,28 @@ All components are designed for concurrent access:
 ```
 
 **Terminal States** (checked via `TaskState::is_terminal()`):
-- `Completed` - Task finished successfully
-- `Failed` - Task failed with error
-- `Canceled` - Task was cancelled
-- `Rejected` - Task was rejected (e.g., validation failed)
+- `completed` - Task finished successfully
+- `failed` - Task failed with error
+- `canceled` - Task was cancelled
+- `rejected` - Task was rejected
+
+---
+
+## Wire Format Summary
+
+All types use `camelCase` JSON serialization. Key discriminators:
+
+| Type | `kind` value | Distinguishing fields |
+|------|-------------|----------------------|
+| `Part::Text` | `"text"` | `text` |
+| `Part::File` | `"file"` | `file: {uri?, bytes?, mimeType?, name?}` |
+| `Part::Data` | `"data"` | `data` |
+| `Task` | `"task"` | `id`, `contextId`, `status` |
+| `Message` | `"message"` | `messageId`, `role`, `parts` |
+| `TaskStatusUpdateEvent` | `"status-update"` | `taskId`, `status`, `final` |
+| `TaskArtifactUpdateEvent` | `"artifact-update"` | `taskId`, `artifact` |
+
+Role values: `"user"`, `"agent"`. Task state values: `"submitted"`, `"working"`, `"completed"`, `"failed"`, `"canceled"`, `"input-required"`, `"rejected"`, `"auth-required"`.
 
 ---
 
@@ -314,6 +308,6 @@ All components are designed for concurrent access:
 | thiserror | | | x |
 | anyhow | | x | x |
 | tracing | | x | x |
-| sha2 | | x | |
-| base64 | | x | |
-| rand | | x | |
+| futures-core | | x | |
+| async-stream | | x | x |
+| tokio-stream | | x | x |

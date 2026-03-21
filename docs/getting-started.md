@@ -65,8 +65,8 @@ curl -X POST http://127.0.0.1:8080/v1/rpc \
     "params": {
       "message": {
         "messageId": "msg-1",
-        "role": "ROLE_USER",
-        "parts": [{"text": "Hello, agent!"}]
+        "role": "user",
+        "parts": [{"kind": "text", "text": "Hello, agent!"}]
       }
     }
   }'
@@ -96,7 +96,7 @@ impl MessageHandler for GreetingHandler {
     ) -> HandlerResult<SendMessageResponse> {
         // Extract text from the message
         let user_text: String = message.parts.iter()
-            .filter_map(|p| p.text.as_deref())
+            .filter_map(|p| p.as_text())
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -226,13 +226,14 @@ async fn main() -> anyhow::Result<()> {
 
 ```rust
 use a2a_rs_client::A2aClient;
-use a2a_rs_core::{Message, Part, Role, SendMessageResponse};
+use a2a_rs_core::{Message, Part, Role, SendMessageResult};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let client = A2aClient::with_server("http://127.0.0.1:8080")?;
 
     let message = Message {
+        kind: "message".to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),
         role: Role::User,
         parts: vec![Part::text("What is the capital of France?")],
@@ -246,22 +247,22 @@ async fn main() -> anyhow::Result<()> {
     let response = client.send_message(message, None).await?;
 
     match response {
-        SendMessageResponse::Task(task) => {
+        SendMessageResult::Task(task) => {
             println!("Task ID: {}", task.id);
             println!("State: {:?}", task.status.state);
             if let Some(history) = &task.history {
                 for msg in history.iter().filter(|m| m.role == Role::Agent) {
                     for part in &msg.parts {
-                        if let Some(text) = &part.text {
+                        if let Some(text) = part.as_text() {
                             println!("Response: {}", text);
                         }
                     }
                 }
             }
         }
-        SendMessageResponse::Message(msg) => {
+        SendMessageResult::Message(msg) => {
             for part in &msg.parts {
-                if let Some(text) = &part.text {
+                if let Some(text) = part.as_text() {
                     println!("Response: {}", text);
                 }
             }
@@ -272,13 +273,72 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### 3. Poll for Completion (Async Tasks)
+### 3. Stream a Response
 
-For agents that process asynchronously:
+For real-time updates via Server-Sent Events:
+
+```rust
+use a2a_rs_client::A2aClient;
+use a2a_rs_core::{Message, Part, Role, StreamingMessageResult};
+use tokio_stream::StreamExt;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let client = A2aClient::with_server("http://127.0.0.1:8080")?;
+
+    let message = Message {
+        kind: "message".to_string(),
+        message_id: uuid::Uuid::new_v4().to_string(),
+        role: Role::User,
+        parts: vec![Part::text("Generate a report")],
+        context_id: None,
+        task_id: None,
+        extensions: vec![],
+        reference_task_ids: None,
+        metadata: None,
+    };
+
+    let mut stream = client.send_message_streaming(message, None).await?;
+
+    while let Some(event) = stream.next().await {
+        match event? {
+            StreamingMessageResult::StatusUpdate(update) => {
+                println!("Status: {:?}", update.status.state);
+                if update.is_final {
+                    break;
+                }
+            }
+            StreamingMessageResult::ArtifactUpdate(artifact) => {
+                for part in &artifact.artifact.parts {
+                    if let Some(text) = part.as_text() {
+                        print!("{}", text);
+                    }
+                }
+            }
+            StreamingMessageResult::Task(task) => {
+                println!("Task {} state: {:?}", task.id, task.status.state);
+            }
+            StreamingMessageResult::Message(msg) => {
+                for part in &msg.parts {
+                    if let Some(text) = part.as_text() {
+                        println!("Agent: {}", text);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+```
+
+### 4. Poll for Completion (Async Tasks)
+
+For agents that process asynchronously without streaming:
 
 ```rust
 use a2a_rs_client::{A2aClient, ClientConfig};
-use a2a_rs_core::{Message, Part, Role, SendMessageResponse, TaskState};
+use a2a_rs_core::{Message, Part, Role, SendMessageResult, TaskState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -292,6 +352,7 @@ async fn main() -> anyhow::Result<()> {
     let client = A2aClient::new(config)?;
 
     let message = Message {
+        kind: "message".to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),
         role: Role::User,
         parts: vec![Part::text("Generate a long report...")],
@@ -304,8 +365,8 @@ async fn main() -> anyhow::Result<()> {
 
     let response = client.send_message(message, None).await?;
     let task_id = match &response {
-        SendMessageResponse::Task(t) => t.id.clone(),
-        SendMessageResponse::Message(_) => anyhow::bail!("Expected task response"),
+        SendMessageResult::Task(t) => t.id.clone(),
+        SendMessageResult::Message(_) => anyhow::bail!("Expected task response"),
     };
 
     println!("Task submitted: {}", task_id);
@@ -322,7 +383,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### 4. Using OAuth Authentication
+### 5. Using OAuth Authentication
 
 ```rust
 use a2a_rs_client::{A2aClient, ClientConfig, OAuthConfig};
@@ -385,17 +446,15 @@ let text_msg = new_message(
 
 // Manual message construction with multiple parts
 let complex_msg = Message {
+    kind: "message".to_string(),
     message_id: uuid::Uuid::new_v4().to_string(),
     role: Role::User,
     parts: vec![
         Part::text("Please analyze this data:"),
-        Part::data(
-            serde_json::json!({
-                "sales": [100, 200, 150],
-                "period": "Q1 2024"
-            }),
-            "application/json",
-        ),
+        Part::data(serde_json::json!({
+            "sales": [100, 200, 150],
+            "period": "Q1 2024"
+        })),
     ],
     context_id: Some("analysis-session".to_string()),
     task_id: None,
@@ -410,13 +469,14 @@ let complex_msg = Message {
 ```rust
 use a2a_rs_core::{Message, Part, Role};
 
-// Message with URL reference
+// Message with file URI reference
 let file_msg = Message {
+    kind: "message".to_string(),
     message_id: uuid::Uuid::new_v4().to_string(),
     role: Role::User,
     parts: vec![
         Part::text("Summarize this document"),
-        Part::url("https://example.com/report.pdf", "application/pdf"),
+        Part::file_uri("https://example.com/report.pdf", "application/pdf"),
     ],
     context_id: None,
     task_id: None,
@@ -427,11 +487,12 @@ let file_msg = Message {
 
 // Message with inline bytes (base64 encoded)
 let image_msg = Message {
+    kind: "message".to_string(),
     message_id: uuid::Uuid::new_v4().to_string(),
     role: Role::User,
     parts: vec![
         Part::text("What's in this image?"),
-        Part::raw("iVBORw0KGgoAAAANS...", "image/png"),
+        Part::file_bytes("iVBORw0KGgoAAAANS...", "image/png"),
     ],
     context_id: None,
     task_id: None,
@@ -448,8 +509,8 @@ let image_msg = Message {
 ### Error Handling in Handlers
 
 ```rust
-use a2a_rs_server::{HandlerError, HandlerResult};
-use a2a_rs_core::{Message, Part, SendMessageResponse, completed_task_with_text};
+use a2a_rs_server::{HandlerError, HandlerResult, AuthContext};
+use a2a_rs_core::{Message, SendMessageResponse, completed_task_with_text};
 
 async fn handle_message(
     message: Message,
@@ -480,44 +541,7 @@ async fn handle_message(
 }
 ```
 
-### Conversation Context
-
-```rust
-use a2a_rs_core::{Message, Part, Role};
-use uuid::Uuid;
-
-// Start a new conversation
-let context_id = Uuid::new_v4().to_string();
-
-let msg1 = Message {
-    message_id: Uuid::new_v4().to_string(),
-    role: Role::User,
-    parts: vec![Part::text("My name is Alice")],
-    context_id: Some(context_id.clone()),
-    task_id: None,
-    extensions: vec![],
-    reference_task_ids: None,
-    metadata: None,
-};
-
-// Continue the same conversation
-let msg2 = Message {
-    message_id: Uuid::new_v4().to_string(),
-    role: Role::User,
-    parts: vec![Part::text("What's my name?")],
-    context_id: Some(context_id.clone()), // Same context_id
-    task_id: None,
-    extensions: vec![],
-    reference_task_ids: None,
-    metadata: None,
-};
-```
-
----
-
-## Testing Your Agent
-
-### Unit Testing Handlers
+### Testing Your Agent
 
 ```rust
 #[cfg(test)]
@@ -536,11 +560,11 @@ mod tests {
             SendMessageResponse::Task(task) => {
                 assert_eq!(task.status.state, TaskState::Completed);
                 let history = task.history.unwrap();
-                assert_eq!(history.len(), 2); // User message + agent response
+                assert_eq!(history.len(), 2);
 
                 let agent_msg = &history[1];
                 assert_eq!(agent_msg.role, Role::Agent);
-                assert!(agent_msg.parts[0].text.as_deref().unwrap().contains("Hello"));
+                assert!(agent_msg.parts[0].as_text().unwrap().contains("Hello"));
             }
             _ => panic!("Expected Task response"),
         }
@@ -569,8 +593,8 @@ async fn test_echo_server() {
         "params": {
             "message": {
                 "messageId": "msg-1",
-                "role": "ROLE_USER",
-                "parts": [{"text": "Hello!"}]
+                "role": "user",
+                "parts": [{"kind": "text", "text": "Hello!"}]
             }
         },
         "id": 1
@@ -593,7 +617,8 @@ async fn test_echo_server() {
 ## Next Steps
 
 1. **Read the [Architecture Guide](architecture.md)** for a deeper understanding of the crates
-2. **Run the echo example** in `examples/echo_server.rs`
-3. **Implement your handler** for your preferred AI backend (OpenAI, Anthropic, local models, etc.)
-4. **Add authentication** appropriate for your use case
-5. **Deploy** with proper monitoring and error handling
+2. **Run the echo example** with `cargo run --example echo_server`
+3. **Implement your handler** for your preferred AI backend
+4. **Add streaming** for real-time responses
+5. **Add authentication** appropriate for your use case
+6. **Deploy** with proper monitoring and error handling
