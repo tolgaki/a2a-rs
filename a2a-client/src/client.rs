@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use std::pin::Pin;
 
 use a2a_rs_core::{
-    AgentCard, GetTaskRequest, JsonRpcRequest, JsonRpcResponse, Message, SendMessageRequest,
-    SendMessageResult, StreamingMessageResult, Task,
+    AgentCard, GetTaskRequest, JsonRpcRequest, JsonRpcResponse, Message,
+    SendMessageConfiguration, SendMessageRequest, SendMessageResult, StreamingMessageResult, Task,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -36,6 +36,12 @@ pub struct ClientConfig {
     pub poll_interval_ms: u64,
     /// OAuth configuration (if using OAuth authentication)
     pub oauth: Option<OAuthConfig>,
+    /// Direct JSON-RPC endpoint URL — if set, skip agent card discovery
+    pub endpoint_url: Option<String>,
+    /// Pre-configured reqwest client (for custom headers, timeouts, etc.)
+    ///
+    /// If `None`, a default `reqwest::Client` is created.
+    pub http_client: Option<Client>,
 }
 
 impl Default for ClientConfig {
@@ -45,6 +51,8 @@ impl Default for ClientConfig {
             max_polls: 30,
             poll_interval_ms: 2000,
             oauth: None,
+            endpoint_url: None,
+            http_client: None,
         }
     }
 }
@@ -134,10 +142,11 @@ impl A2aClient {
     pub fn new(config: ClientConfig) -> Result<Self> {
         let base_url = Url::parse(&config.server_url)
             .with_context(|| format!("Invalid server URL: {}", config.server_url))?;
+        let http = config.http_client.clone().unwrap_or_default();
 
         Ok(Self {
             config,
-            http: Client::new(),
+            http,
             base_url,
             card_cache: Arc::new(RwLock::new(None)),
             endpoint_cache: Arc::new(RwLock::new(None)),
@@ -200,8 +209,15 @@ impl A2aClient {
         *endpoint = None;
     }
 
-    /// Get the cached RPC endpoint URL, fetching from agent card if needed
+    /// Get the cached RPC endpoint URL, fetching from agent card if needed.
+    ///
+    /// If `endpoint_url` is set in config, returns it directly (skips agent card discovery).
     async fn get_cached_endpoint(&self) -> Result<String> {
+        // Direct endpoint overrides everything
+        if let Some(endpoint) = &self.config.endpoint_url {
+            return Ok(endpoint.clone());
+        }
+
         // Check endpoint cache first
         {
             let cache = self.endpoint_cache.read().await;
@@ -271,11 +287,12 @@ impl A2aClient {
         &self,
         message: Message,
         session_token: Option<&str>,
+        configuration: Option<SendMessageConfiguration>,
     ) -> Result<SendMessageResult> {
         let params = SendMessageRequest {
             tenant: None,
             message,
-            configuration: None,
+            configuration,
             metadata: None,
         };
         self.json_rpc_call("message/send", params, session_token)
@@ -291,13 +308,14 @@ impl A2aClient {
         &self,
         message: Message,
         session_token: Option<&str>,
+        configuration: Option<SendMessageConfiguration>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamingMessageResult>> + Send>>> {
         let rpc_url = self.get_cached_endpoint().await?;
 
         let params = SendMessageRequest {
             tenant: None,
             message,
-            configuration: None,
+            configuration,
             metadata: None,
         };
 
@@ -518,11 +536,9 @@ pub fn generate_random_string(length: usize) -> String {
 /// Parse an SSE response into a stream of `StreamingMessageResult` items.
 ///
 /// Each SSE event's `data:` line contains a JSON-RPC response envelope.
-/// We extract the `result` field and deserialize it as `StreamingMessageResult`.
-/// Parse an SSE response into a stream of `StreamingMessageResult` items.
-///
-/// Each SSE event's `data:` line contains a JSON-RPC response envelope.
-/// We extract the `result` field and deserialize it as `StreamingMessageResult`.
+/// Handles multi-line `data:` fields (concatenated with `\n`) and dispatches
+/// on empty lines per the SSE spec. Also processes any remaining buffered
+/// data when the stream ends.
 fn sse_stream(
     resp: reqwest::Response,
 ) -> impl Stream<Item = Result<StreamingMessageResult>> + Send {
@@ -531,24 +547,55 @@ fn sse_stream(
 
         let mut bytes_stream = resp.bytes_stream();
         let mut buffer = String::new();
+        // Accumulated data: field values for the current event (multi-line support)
+        let mut data_buf: Vec<String> = Vec::new();
 
-        while let Some(chunk) = bytes_stream.next().await {
-            let chunk = chunk?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+        loop {
+            // Read next chunk, or drain remaining buffer when stream ends
+            let done = match bytes_stream.next().await {
+                Some(Ok(chunk)) => {
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    false
+                }
+                Some(Err(e)) => Err(e)?,
+                None => true,
+            };
 
             // Process complete lines
             while let Some(newline_pos) = buffer.find('\n') {
                 let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
                 buffer = buffer[newline_pos + 1..].to_string();
 
-                if let Some(data) = line.strip_prefix("data:") {
-                    let data = data.trim();
-                    if data.is_empty() {
-                        continue;
-                    }
+                if line.is_empty() {
+                    // Empty line = dispatch event
+                    if !data_buf.is_empty() {
+                        let data = data_buf.join("\n");
+                        data_buf.clear();
 
-                    // Parse as JSON-RPC response envelope
-                    let rpc_resp: JsonRpcResponse = serde_json::from_str(data)?;
+                        let rpc_resp: JsonRpcResponse = serde_json::from_str(&data)?;
+
+                        if let Some(err) = rpc_resp.error {
+                            Err(anyhow!("Server error {}: {}", err.code, err.message))?;
+                        }
+
+                        if let Some(result) = rpc_resp.result {
+                            let event: StreamingMessageResult = serde_json::from_value(result)?;
+                            yield event;
+                        }
+                    }
+                } else if let Some(value) = line.strip_prefix("data:") {
+                    // Accumulate data field (trim leading single space per SSE spec)
+                    let value = value.strip_prefix(' ').unwrap_or(value);
+                    data_buf.push(value.to_string());
+                }
+                // Ignore other fields (event:, id:, retry:) and comments (:)
+            }
+
+            if done {
+                // Dispatch any remaining data when stream closes without trailing \n
+                if !data_buf.is_empty() {
+                    let data = data_buf.join("\n");
+                    let rpc_resp: JsonRpcResponse = serde_json::from_str(&data)?;
 
                     if let Some(err) = rpc_resp.error {
                         Err(anyhow!("Server error {}: {}", err.code, err.message))?;
@@ -559,7 +606,7 @@ fn sse_stream(
                         yield event;
                     }
                 }
-                // Ignore other lines (comments starting with ':', empty lines, etc.)
+                break;
             }
         }
     }

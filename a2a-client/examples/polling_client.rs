@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         server_url: server_url.clone(),
         max_polls: 10,          // try up to 10 times
         poll_interval_ms: 1000, // wait 1 second between polls
-        oauth: None,
+        ..Default::default()
     })?;
 
     println!("Connected to {}", server_url);
@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     println!("Sending message...");
-    let response = client.send_message(message, None).await?;
+    let response = client.send_message(message, None, None).await?;
 
     match response {
         SendMessageResult::Task(task) => {

@@ -30,7 +30,7 @@
 //!     metadata: None,
 //! };
 //!
-//! let response = client.send_message(message, None).await?;
+//! let response = client.send_message(message, None, None).await?;
 //! ```
 
 mod client;

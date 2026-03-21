@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     println!("\nSending message...");
-    let response = client.send_message(message, None).await?;
+    let response = client.send_message(message, None, None).await?;
 
     // --- Step 4: Handle the response ---
     match response {
