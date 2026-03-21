@@ -78,7 +78,7 @@ impl MessageHandler for MyAiAgent {
     ) -> HandlerResult<SendMessageResponse> {
         // Extract text from message parts
         let user_text: String = message.parts.iter()
-            .filter_map(|p| p.text.as_deref())
+            .filter_map(|p| p.as_text())
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
 
 ```rust
 use a2a_rs_client::A2aClient;
-use a2a_rs_core::{Message, Part, Role, SendMessageResponse};
+use a2a_rs_core::{Message, Part, Role, SendMessageResult};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -140,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create and send a message
     let message = Message {
+        kind: "message".to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),
         role: Role::User,
         parts: vec![Part::text("Hello, agent!")],
@@ -153,21 +154,21 @@ async fn main() -> anyhow::Result<()> {
     let response = client.send_message(message, None).await?;
 
     match response {
-        SendMessageResponse::Task(task) => {
+        SendMessageResult::Task(task) => {
             println!("Task state: {:?}", task.status.state);
             if let Some(history) = &task.history {
                 for msg in history.iter().filter(|m| m.role == Role::Agent) {
                     for part in &msg.parts {
-                        if let Some(text) = &part.text {
+                        if let Some(text) = part.as_text() {
                             println!("Agent: {}", text);
                         }
                     }
                 }
             }
         }
-        SendMessageResponse::Message(msg) => {
+        SendMessageResult::Message(msg) => {
             for part in &msg.parts {
-                if let Some(text) = &part.text {
+                if let Some(text) = part.as_text() {
                     println!("Agent: {}", text);
                 }
             }
@@ -231,13 +232,14 @@ let card = AgentCard {
 
 ### Messages and Parts
 
-Messages contain multimodal content via flat **Part** structs:
+Messages contain multimodal content via **Part** variants, each tagged with a `kind` discriminator:
 
 ```rust
 use a2a_rs_core::{Message, Part, Role};
 
 // Text message
 let msg = Message {
+    kind: "message".to_string(),
     message_id: "msg-1".to_string(),
     role: Role::User,
     parts: vec![Part::text("Analyze this document")],
@@ -248,17 +250,21 @@ let msg = Message {
     metadata: None,
 };
 
-// URL reference part
-let url_part = Part::url("https://example.com/doc.pdf", "application/pdf");
+// File URI part
+let file_part = Part::file_uri("https://example.com/doc.pdf", "application/pdf");
 
 // Structured data part
 let data_part = Part::data(
     serde_json::json!({"location": "New York", "units": "celsius"}),
-    "application/json",
 );
 
-// Raw bytes part (base64-encoded)
-let raw_part = Part::raw("iVBORw0KGgoAAAANS...", "image/png");
+// File bytes part (base64-encoded)
+let bytes_part = Part::file_bytes("iVBORw0KGgoAAAANS...", "image/png");
+
+// Extract text from a part
+if let Some(text) = msg.parts[0].as_text() {
+    println!("{}", text);
+}
 ```
 
 ### Tasks and States
@@ -382,6 +388,119 @@ let token = client.perform_oauth_interactive().await?;
 let (auth_url, code_verifier) = client.start_oauth_flow().await?;
 ```
 
+### Streaming
+
+Use `send_message_streaming()` to receive real-time updates via Server-Sent Events:
+
+```rust
+use a2a_rs_client::A2aClient;
+use a2a_rs_core::{Message, Part, Role, StreamingMessageResult};
+use tokio_stream::StreamExt;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let client = A2aClient::with_server("http://localhost:8080")?;
+
+    let message = Message {
+        kind: "message".to_string(),
+        message_id: uuid::Uuid::new_v4().to_string(),
+        role: Role::User,
+        parts: vec![Part::text("Tell me a story")],
+        context_id: None,
+        task_id: None,
+        extensions: vec![],
+        reference_task_ids: None,
+        metadata: None,
+    };
+
+    let mut stream = client.send_message_streaming(message, None).await?;
+
+    while let Some(event) = stream.next().await {
+        match event? {
+            StreamingMessageResult::StatusUpdate(update) => {
+                println!("Status: {:?}", update.status.state);
+                if update.is_final {
+                    break;
+                }
+            }
+            StreamingMessageResult::ArtifactUpdate(artifact) => {
+                for part in &artifact.artifact.parts {
+                    if let Some(text) = part.as_text() {
+                        print!("{}", text);
+                    }
+                }
+            }
+            StreamingMessageResult::Task(task) => {
+                println!("Task {} state: {:?}", task.id, task.status.state);
+            }
+            StreamingMessageResult::Message(msg) => {
+                for part in &msg.parts {
+                    if let Some(text) = part.as_text() {
+                        println!("Agent: {}", text);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+```
+
+#### Server-side streaming
+
+Enable streaming in your agent card and push updates via the event broadcaster:
+
+```rust
+use a2a_rs_server::A2aServer;
+use a2a_rs_core::{
+    AgentCapabilities, StreamResponse, TaskStatusUpdateEvent, TaskStatus, TaskState,
+};
+
+// Enable streaming in capabilities
+let capabilities = AgentCapabilities {
+    streaming: Some(true),
+    ..Default::default()
+};
+
+// After creating the server, get the event sender for pushing updates
+let server = A2aServer::new(my_handler);
+let event_tx = server.get_event_sender();
+
+// From background processing, push status updates:
+event_tx.send(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+    kind: "status-update".to_string(),
+    task_id: "task-123".to_string(),
+    context_id: "ctx-456".to_string(),
+    status: TaskStatus {
+        state: TaskState::Working,
+        message: None,
+        timestamp: None,
+    },
+    is_final: false,
+    metadata: None,
+})).ok();
+
+// Send final event when done:
+event_tx.send(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+    kind: "status-update".to_string(),
+    task_id: "task-123".to_string(),
+    context_id: "ctx-456".to_string(),
+    status: TaskStatus {
+        state: TaskState::Completed,
+        message: None,
+        timestamp: None,
+    },
+    is_final: true,
+    metadata: None,
+})).ok();
+```
+
+The server handles `message/stream` requests on the same `/v1/rpc` endpoint. Each SSE
+event's `data:` field contains a full JSON-RPC response envelope wrapping the result.
+The stream ends when a `TaskStatusUpdateEvent` with `final: true` is sent or the task
+reaches a terminal state.
+
 ## JSON-RPC Methods
 
 The A2A protocol defines these JSON-RPC methods:
@@ -389,7 +508,7 @@ The A2A protocol defines these JSON-RPC methods:
 | Method | Description |
 |--------|-------------|
 | `message/send` | Send a message to the agent |
-| `message/sendStreaming` | Send with streaming response |
+| `message/stream` | Send with SSE streaming response |
 | `tasks/get` | Query a task by ID |
 | `tasks/cancel` | Cancel a running task |
 | `tasks/list` | List tasks |
@@ -412,8 +531,8 @@ curl -X POST http://localhost:8080/v1/rpc \
     "params": {
       "message": {
         "messageId": "msg-1",
-        "role": "ROLE_USER",
-        "parts": [{"text": "Hello!"}]
+        "role": "user",
+        "parts": [{"kind": "text", "text": "Hello!"}]
       }
     }
   }'
