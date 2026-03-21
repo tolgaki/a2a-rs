@@ -156,6 +156,7 @@ impl MessageHandler for EchoHandler {
         };
 
         Ok(SendMessageResponse::Task(Task {
+            kind: "task".to_string(),
             id: task_id,
             context_id,
             status: TaskStatus {

@@ -29,6 +29,7 @@ const SUPPORTED_VERSION_MINOR: u32 = 0;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::future::FutureExt;
@@ -147,12 +148,10 @@ impl A2aServer {
                     .timeout(Duration::from_secs(30)),
             );
 
-        let sse_routes = Router::new()
-            .route(
-                "/v1/tasks/:task_id/subscribe",
-                get(handle_task_subscribe_sse),
-            )
-            .route("/v1/message/stream", post(handle_message_stream_sse));
+        let sse_routes = Router::new().route(
+            "/v1/tasks/:task_id/subscribe",
+            get(handle_task_subscribe_sse),
+        );
 
         let mut router = timed_routes.merge(sse_routes);
 
@@ -409,8 +408,7 @@ async fn handle_task_subscribe_sse(
 
     let stream = async_stream::stream! {
         if let Some(task) = task_store.get_flexible(&target_task_id).await {
-            let event = StreamResponse::Task(task);
-            if let Ok(json) = serde_json::to_string(&event) {
+            if let Ok(json) = serde_json::to_string(&task) {
                 yield Ok(Event::default().data(json));
             }
         }
@@ -425,28 +423,29 @@ async fn handle_task_subscribe_sse(
                         StreamResponse::Message(_) => false,
                     };
                     if matches {
-                        if let Ok(json) = serde_json::to_string(&event) {
+                        // Serialize the inner value directly
+                        let json = match &event {
+                            StreamResponse::Task(t) => serde_json::to_string(t),
+                            StreamResponse::Message(m) => serde_json::to_string(m),
+                            StreamResponse::StatusUpdate(e) => serde_json::to_string(e),
+                            StreamResponse::ArtifactUpdate(e) => serde_json::to_string(e),
+                        };
+                        if let Ok(json) = json {
                             yield Ok(Event::default().data(json));
                         }
 
-                        if let StreamResponse::Task(t) = &event {
-                            if t.status.state.is_terminal() {
-                                break;
-                            }
-                        }
-                        if let StreamResponse::StatusUpdate(e) = &event {
-                            if e.status.state.is_terminal() {
-                                break;
-                            }
+                        let is_terminal = match &event {
+                            StreamResponse::Task(t) => t.status.state.is_terminal(),
+                            StreamResponse::StatusUpdate(e) => e.is_final || e.status.state.is_terminal(),
+                            _ => false,
+                        };
+                        if is_terminal {
+                            break;
                         }
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    break;
-                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     };
@@ -458,14 +457,14 @@ async fn handle_rpc(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
-) -> (StatusCode, Json<JsonRpcResponse>) {
+) -> Response {
     if req.jsonrpc != "2.0" {
         let resp = error(req.id, errors::INVALID_REQUEST, "jsonrpc must be 2.0", None);
-        return (StatusCode::BAD_REQUEST, Json(resp));
+        return (StatusCode::BAD_REQUEST, Json(resp)).into_response();
     }
 
     if let Err(err_response) = validate_a2a_version(&headers, &req.id) {
-        return err_response;
+        return err_response.into_response();
     }
 
     let auth_context = state
@@ -475,17 +474,33 @@ async fn handle_rpc(
 
     match req.method.as_str() {
         // Spec method names per JSON-RPC binding
-        "message/send" => handle_message_send(state, req, auth_context).await,
-        "message/sendStreaming" => handle_message_stream_rpc(state, req).await,
-        "tasks/get" => handle_tasks_get(state, req).await,
-        "tasks/list" => handle_tasks_list(state, req).await,
-        "tasks/cancel" => handle_tasks_cancel(state, req).await,
-        "tasks/subscribe" => handle_tasks_subscribe(state, req).await,
-        "tasks/pushNotificationConfig/create" => handle_push_config_create(state, req).await,
-        "tasks/pushNotificationConfig/get" => handle_push_config_get(state, req).await,
-        "tasks/pushNotificationConfig/list" => handle_push_config_list(state, req).await,
-        "tasks/pushNotificationConfig/delete" => handle_push_config_delete(state, req).await,
-        "agentCard/getExtended" => handle_get_extended_agent_card(state, req, auth_context).await,
+        "message/send" => handle_message_send(state, req, auth_context)
+            .await
+            .into_response(),
+        "message/stream" => {
+            handle_message_stream(state, req, headers, auth_context)
+                .await
+                .into_response()
+        }
+        "tasks/get" => handle_tasks_get(state, req).await.into_response(),
+        "tasks/list" => handle_tasks_list(state, req).await.into_response(),
+        "tasks/cancel" => handle_tasks_cancel(state, req).await.into_response(),
+        "tasks/subscribe" => handle_tasks_subscribe(state, req).await.into_response(),
+        "tasks/pushNotificationConfig/create" => {
+            handle_push_config_create(state, req).await.into_response()
+        }
+        "tasks/pushNotificationConfig/get" => {
+            handle_push_config_get(state, req).await.into_response()
+        }
+        "tasks/pushNotificationConfig/list" => {
+            handle_push_config_list(state, req).await.into_response()
+        }
+        "tasks/pushNotificationConfig/delete" => {
+            handle_push_config_delete(state, req).await.into_response()
+        }
+        "agentCard/getExtended" => handle_get_extended_agent_card(state, req, auth_context)
+            .await
+            .into_response(),
         _ => (
             StatusCode::NOT_FOUND,
             Json(error(
@@ -494,7 +509,8 @@ async fn handle_rpc(
                 "method not found",
                 None,
             )),
-        ),
+        )
+            .into_response(),
     }
 }
 
@@ -653,86 +669,76 @@ async fn handle_message_send(
     }
 }
 
-async fn handle_message_stream_rpc(
+/// Handle `message/stream` — returns SSE directly from the JSON-RPC endpoint.
+///
+/// Each SSE event's `data:` is a full JSON-RPC response envelope wrapping the result
+/// (Task, Message, TaskStatusUpdateEvent, or TaskArtifactUpdateEvent).
+async fn handle_message_stream(
     state: AppState,
     req: JsonRpcRequest,
-) -> (StatusCode, Json<JsonRpcResponse>) {
+    _headers: HeaderMap,
+    auth_context: Option<AuthContext>,
+) -> Response {
+    let req_id = req.id.clone();
+
     if !state.streaming_enabled() {
         return (
             StatusCode::BAD_REQUEST,
             Json(error(
-                req.id,
+                req_id,
                 errors::UNSUPPORTED_OPERATION,
                 "streaming not supported by this agent",
                 None,
             )),
-        );
+        )
+            .into_response();
     }
 
-    let base_url = state.endpoint_url().trim_end_matches("/v1/rpc");
-    let stream_url = format!("{}/v1/message/stream", base_url);
+    let params: Result<SendMessageRequest, _> =
+        serde_json::from_value(req.params.clone().unwrap_or_default());
 
-    (
-        StatusCode::OK,
-        Json(success(
-            req.id,
-            serde_json::json!({
-                "streamUrl": stream_url,
-                "protocol": "sse",
-                "method": "POST"
-            }),
-        )),
-    )
-}
+    let params = match params {
+        Ok(p) => p,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error(
+                    req_id,
+                    errors::INVALID_PARAMS,
+                    "invalid params",
+                    Some(serde_json::json!({"error": err.to_string()})),
+                )),
+            )
+                .into_response();
+        }
+    };
 
-async fn handle_message_stream_sse(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(params): Json<SendMessageRequest>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<JsonRpcResponse>)>
-{
-    if !state.streaming_enabled() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(error(
-                serde_json::Value::Null,
-                errors::UNSUPPORTED_OPERATION,
-                "streaming not supported by this agent",
-                None,
-            )),
-        ));
-    }
-
-    let auth_context = state
-        .auth_extractor
-        .as_ref()
-        .and_then(|extractor| extractor(&headers));
-
-    let response = state
+    let response = match state
         .handler
         .handle_message(params.message, auth_context)
         .await
-        .map_err(|e| {
+    {
+        Ok(r) => r,
+        Err(e) => {
             let (code, status) = handler_error_to_rpc(&e);
-            (
-                status,
-                Json(error(serde_json::Value::Null, code, &e.to_string(), None)),
-            )
-        })?;
+            return (status, Json(error(req_id, code, &e.to_string(), None))).into_response();
+        }
+    };
 
     // Extract task from response (streaming only works with tasks)
     let task = match response {
         SendMessageResponse::Task(t) => t,
         SendMessageResponse::Message(_) => {
-            return Err((
+            return (
                 StatusCode::BAD_REQUEST,
                 Json(error(
-                    serde_json::Value::Null,
+                    req_id,
                     errors::UNSUPPORTED_OPERATION,
                     "handler returned a message, streaming requires a task",
                     None,
                 )),
-            ));
+            )
+                .into_response();
         }
     };
 
@@ -744,10 +750,15 @@ async fn handle_message_stream_sse(
     let task_store = state.task_store.clone();
     let target_task_id = task_id;
 
+    // Helper: wrap a value in a JSON-RPC success response envelope
+    let wrap = move |value: serde_json::Value| -> String {
+        serde_json::to_string(&success(req_id.clone(), value)).unwrap_or_default()
+    };
+
     let stream = async_stream::stream! {
-        let event = StreamResponse::Task(task);
-        if let Ok(json) = serde_json::to_string(&event) {
-            yield Ok(Event::default().data(json));
+        // Yield initial task
+        if let Ok(val) = serde_json::to_value(&task) {
+            yield Ok::<_, Infallible>(Event::default().data(wrap(val)));
         }
 
         loop {
@@ -767,19 +778,25 @@ async fn handle_message_stream_sse(
                     };
 
                     if matches {
-                        if let Ok(json) = serde_json::to_string(&event) {
-                            yield Ok(Event::default().data(json));
+                        // Serialize the inner value directly (not the StreamResponse wrapper)
+                        let val = match &event {
+                            StreamResponse::Task(t) => serde_json::to_value(t),
+                            StreamResponse::Message(m) => serde_json::to_value(m),
+                            StreamResponse::StatusUpdate(e) => serde_json::to_value(e),
+                            StreamResponse::ArtifactUpdate(e) => serde_json::to_value(e),
+                        };
+                        if let Ok(val) = val {
+                            yield Ok(Event::default().data(wrap(val)));
                         }
 
-                        if let StreamResponse::Task(t) = &event {
-                            if t.status.state.is_terminal() {
-                                break;
-                            }
-                        }
-                        if let StreamResponse::StatusUpdate(e) = &event {
-                            if e.status.state.is_terminal() {
-                                break;
-                            }
+                        // End stream on terminal state or final flag
+                        let is_terminal = match &event {
+                            StreamResponse::Task(t) => t.status.state.is_terminal(),
+                            StreamResponse::StatusUpdate(e) => e.is_final || e.status.state.is_terminal(),
+                            _ => false,
+                        };
+                        if is_terminal {
+                            break;
                         }
                     }
                 }
@@ -789,7 +806,7 @@ async fn handle_message_stream_sse(
         }
     };
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
 async fn handle_tasks_get(
@@ -866,9 +883,11 @@ async fn handle_tasks_cancel(
                     }
 
                     state.broadcast_event(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+                        kind: "status-update".to_string(),
                         task_id: task.id.clone(),
                         context_id: task.context_id.clone(),
                         status: task.status.clone(),
+                        is_final: true,
                         metadata: None,
                     }));
 

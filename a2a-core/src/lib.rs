@@ -453,6 +453,18 @@ fn default_message_kind() -> String {
     "message".to_string()
 }
 
+fn default_task_kind() -> String {
+    "task".to_string()
+}
+
+fn default_status_update_kind() -> String {
+    "status-update".to_string()
+}
+
+fn default_artifact_update_kind() -> String {
+    "artifact-update".to_string()
+}
+
 /// Artifact output from task processing per proto spec
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -513,10 +525,13 @@ pub struct TaskStatus {
     pub timestamp: Option<String>,
 }
 
-/// Task resource per A2A RC 1.0 proto spec
+/// Task resource per A2A RC 1.0 spec
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
+    /// Kind discriminator — always "task"
+    #[serde(default = "default_task_kind")]
+    pub kind: String,
     /// Unique task identifier (UUID)
     pub id: String,
     /// Context identifier for grouping related interactions
@@ -923,12 +938,18 @@ pub enum StreamResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskStatusUpdateEvent {
+    /// Kind discriminator — always "status-update"
+    #[serde(default = "default_status_update_kind")]
+    pub kind: String,
     /// Task identifier
     pub task_id: String,
     /// Context identifier
     pub context_id: String,
     /// Updated status
     pub status: TaskStatus,
+    /// Whether this is the final event in the stream
+    #[serde(rename = "final", default)]
+    pub is_final: bool,
     /// Custom metadata
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
@@ -938,6 +959,9 @@ pub struct TaskStatusUpdateEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskArtifactUpdateEvent {
+    /// Kind discriminator — always "artifact-update"
+    #[serde(default = "default_artifact_update_kind")]
+    pub kind: String,
     /// Task identifier
     pub task_id: String,
     /// Context identifier
@@ -953,6 +977,19 @@ pub struct TaskArtifactUpdateEvent {
     /// Custom metadata
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+}
+
+/// Wire-format result for streaming events — the value inside each SSE JSON-RPC `result` field.
+///
+/// Uses untagged serialization; each variant is distinguished by its `kind` field and
+/// unique required fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum StreamingMessageResult {
+    StatusUpdate(TaskStatusUpdateEvent),
+    ArtifactUpdate(TaskArtifactUpdateEvent),
+    Task(Task),
+    Message(Message),
 }
 
 // ---------- Helper functions ----------
@@ -982,6 +1019,7 @@ pub fn completed_task_with_text(user_message: Message, reply_text: &str) -> Task
     let agent_msg = new_message(Role::Agent, reply_text, Some(context_id.clone()));
 
     Task {
+        kind: "task".to_string(),
         id: task_id,
         context_id,
         status: TaskStatus {
@@ -1228,6 +1266,7 @@ mod tests {
     #[test]
     fn send_message_result_serialization() {
         let task = Task {
+            kind: "task".to_string(),
             id: "t-1".to_string(),
             context_id: "ctx-1".to_string(),
             status: TaskStatus {
@@ -1255,6 +1294,7 @@ mod tests {
     #[test]
     fn stream_response_serialization() {
         let event = StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+            kind: "status-update".to_string(),
             task_id: "t-1".to_string(),
             context_id: "ctx-1".to_string(),
             status: TaskStatus {
@@ -1262,6 +1302,7 @@ mod tests {
                 message: None,
                 timestamp: None,
             },
+            is_final: false,
             metadata: None,
         });
         let json = serde_json::to_string(&event).unwrap();

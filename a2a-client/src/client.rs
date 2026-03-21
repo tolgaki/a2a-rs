@@ -5,12 +5,15 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use std::pin::Pin;
+
 use a2a_rs_core::{
     AgentCard, GetTaskRequest, JsonRpcRequest, JsonRpcResponse, Message, SendMessageRequest,
-    SendMessageResult, Task,
+    SendMessageResult, StreamingMessageResult, Task,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use futures_core::Stream;
 use rand::Rng;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
@@ -279,6 +282,59 @@ impl A2aClient {
             .await
     }
 
+    /// Send a streaming message and receive a stream of events (SSE).
+    ///
+    /// Returns a `Stream` of `StreamingMessageResult` items. Each item is a
+    /// Task, Message, TaskStatusUpdateEvent, or TaskArtifactUpdateEvent
+    /// extracted from the JSON-RPC response envelopes in the SSE stream.
+    pub async fn send_message_streaming(
+        &self,
+        message: Message,
+        session_token: Option<&str>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamingMessageResult>> + Send>>> {
+        let rpc_url = self.get_cached_endpoint().await?;
+
+        let params = SendMessageRequest {
+            tenant: None,
+            message,
+            configuration: None,
+            metadata: None,
+        };
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "message/stream".into(),
+            params: Some(serde_json::to_value(&params)?),
+            id: serde_json::json!(1),
+        };
+
+        let mut req_builder = self.http.post(&rpc_url).json(&request);
+        if let Some(token) = session_token {
+            req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
+        }
+
+        let resp = req_builder.send().await?.error_for_status()?;
+
+        // Check that we got SSE back
+        let is_sse = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/event-stream"));
+
+        if !is_sse {
+            // Got a JSON error response instead of SSE
+            let body: JsonRpcResponse = resp.json().await?;
+            if let Some(err) = body.error {
+                anyhow::bail!("Server error {}: {}", err.code, err.message);
+            }
+            anyhow::bail!("Expected SSE stream from server");
+        }
+
+        let stream = sse_stream(resp);
+        Ok(Box::pin(stream))
+    }
+
     /// Poll a task by ID
     pub async fn poll_task(&self, task_id: &str, session_token: Option<&str>) -> Result<Task> {
         let params = GetTaskRequest {
@@ -457,6 +513,56 @@ pub fn generate_random_string(length: usize) -> String {
     let mut rng = rand::thread_rng();
     let random_bytes: Vec<u8> = (0..length).map(|_| rng.gen()).collect();
     URL_SAFE_NO_PAD.encode(&random_bytes)
+}
+
+/// Parse an SSE response into a stream of `StreamingMessageResult` items.
+///
+/// Each SSE event's `data:` line contains a JSON-RPC response envelope.
+/// We extract the `result` field and deserialize it as `StreamingMessageResult`.
+/// Parse an SSE response into a stream of `StreamingMessageResult` items.
+///
+/// Each SSE event's `data:` line contains a JSON-RPC response envelope.
+/// We extract the `result` field and deserialize it as `StreamingMessageResult`.
+fn sse_stream(
+    resp: reqwest::Response,
+) -> impl Stream<Item = Result<StreamingMessageResult>> + Send {
+    async_stream::try_stream! {
+        use tokio_stream::StreamExt;
+
+        let mut bytes_stream = resp.bytes_stream();
+        let mut buffer = String::new();
+
+        while let Some(chunk) = bytes_stream.next().await {
+            let chunk = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            // Process complete lines
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if data.is_empty() {
+                        continue;
+                    }
+
+                    // Parse as JSON-RPC response envelope
+                    let rpc_resp: JsonRpcResponse = serde_json::from_str(data)?;
+
+                    if let Some(err) = rpc_resp.error {
+                        Err(anyhow!("Server error {}: {}", err.code, err.message))?;
+                    }
+
+                    if let Some(result) = rpc_resp.result {
+                        let event: StreamingMessageResult = serde_json::from_value(result)?;
+                        yield event;
+                    }
+                }
+                // Ignore other lines (comments starting with ':', empty lines, etc.)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -238,6 +238,7 @@ mod tests {
 
     fn make_task(id: &str) -> Task {
         Task {
+            kind: "task".to_string(),
             id: id.to_string(),
             context_id: "ctx".to_string(),
             status: TaskStatus {
