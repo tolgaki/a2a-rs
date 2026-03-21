@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use a2a_rs_core::{
     AgentCard, GetTaskRequest, JsonRpcRequest, JsonRpcResponse, Message, SendMessageRequest,
-    SendMessageResponse, Task,
+    SendMessageResult, Task,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -268,7 +268,7 @@ impl A2aClient {
         &self,
         message: Message,
         session_token: Option<&str>,
-    ) -> Result<SendMessageResponse> {
+    ) -> Result<SendMessageResult> {
         let params = SendMessageRequest {
             tenant: None,
             message,

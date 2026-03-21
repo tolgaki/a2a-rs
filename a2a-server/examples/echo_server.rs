@@ -7,7 +7,7 @@
 //!   curl http://127.0.0.1:8080/health
 //!   curl -X POST http://127.0.0.1:8080/v1/rpc \
 //!     -H "Content-Type: application/json" \
-//!     -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"messageId":"msg-1","role":"ROLE_USER","parts":[{"text":"Hello!"}]}}}'
+//!     -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"messageId":"msg-1","role":"ROLE_USER","parts":[{"kind":"text","text":"Hello!"}]}}}'
 
 use a2a_rs_server::A2aServer;
 

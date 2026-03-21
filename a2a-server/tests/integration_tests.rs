@@ -2,7 +2,7 @@
 //!
 //! Tests the JSON-RPC endpoints end-to-end.
 
-use a2a_rs_core::{JsonRpcResponse, Message, Part, Role, SendMessageResponse, TaskState};
+use a2a_rs_core::{JsonRpcResponse, Message, Part, Role, SendMessageResult, TaskState};
 use a2a_rs_server::A2aServer;
 use axum::{
     body::Body,
@@ -50,12 +50,12 @@ fn test_message(id: &str, text: &str) -> Message {
     }
 }
 
-/// Helper to extract Task from SendMessageResponse JSON
+/// Helper to extract Task from the JSON-RPC result field
 fn extract_task(result: serde_json::Value) -> a2a_rs_core::Task {
-    let resp: SendMessageResponse = serde_json::from_value(result).unwrap();
+    let resp: SendMessageResult = serde_json::from_value(result).unwrap();
     match resp {
-        SendMessageResponse::Task(t) => t,
-        SendMessageResponse::Message(_) => panic!("Expected Task response, got Message"),
+        SendMessageResult::Task(t) => t,
+        SendMessageResult::Message(_) => panic!("Expected Task response, got Message"),
     }
 }
 
@@ -260,8 +260,7 @@ async fn test_echo_response_content() {
     assert_eq!(agent_msg.role, Role::Agent);
 
     let text = agent_msg.parts[0]
-        .text
-        .as_deref()
+        .as_text()
         .expect("Expected text part");
     assert!(text.contains("echo:"));
     assert!(text.contains("Hello World"));

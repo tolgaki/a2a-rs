@@ -297,86 +297,110 @@ pub struct AgentSkill {
 
 // ---------- Content Parts ----------
 
-/// Part content — flat struct matching proto3 oneof serialization.
+/// Part content — internally tagged enum using `kind` as the discriminator.
 ///
-/// Exactly one content field (text, raw, url, or data) should be set.
-/// Shared fields (metadata, filename, media_type) can accompany any content type.
+/// Matches the A2A reference SDK wire format:
+/// - `{"kind": "text", "text": "..."}`
+/// - `{"kind": "file", "file": {"uri": "...", "mimeType": "..."}}`
+/// - `{"kind": "data", "data": {...}}`
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind")]
+pub enum Part {
+    /// Text content part
+    #[serde(rename = "text")]
+    Text {
+        /// The text content
+        text: String,
+        /// Part-level metadata
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
+    /// File content part (inline bytes or URI reference)
+    #[serde(rename = "file")]
+    File {
+        /// File content
+        file: FileContent,
+        /// Part-level metadata
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
+    /// Structured data part
+    #[serde(rename = "data")]
+    Data {
+        /// Structured JSON data
+        data: serde_json::Value,
+        /// Part-level metadata
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
+}
+
+/// File content — either inline bytes or a URI reference.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Part {
-    /// Text content (plain text or markdown)
+pub struct FileContent {
+    /// Base64-encoded file bytes
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// Raw bytes content (base64-encoded)
+    pub bytes: Option<String>,
+    /// URI pointing to the file
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw: Option<String>,
-    /// URL reference to content
+    pub uri: Option<String>,
+    /// File name
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// Structured JSON data
+    pub name: Option<String>,
+    /// MIME type
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
-    /// Part-level metadata
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-    /// Optional filename
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filename: Option<String>,
-    /// MIME type (e.g., "text/plain", "image/png", "application/json")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_type: Option<String>,
+    pub mime_type: Option<String>,
 }
 
 impl Part {
     /// Create a text part
     pub fn text(text: impl Into<String>) -> Self {
-        Self {
-            text: Some(text.into()),
-            raw: None,
-            url: None,
-            data: None,
+        Part::Text {
+            text: text.into(),
             metadata: None,
-            filename: None,
-            media_type: None,
         }
     }
 
-    /// Create a URL reference part
-    pub fn url(url: impl Into<String>, media_type: impl Into<String>) -> Self {
-        Self {
-            text: None,
-            raw: None,
-            url: Some(url.into()),
-            data: None,
+    /// Create a file part with a URI reference
+    pub fn file_uri(uri: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        Part::File {
+            file: FileContent {
+                bytes: None,
+                uri: Some(uri.into()),
+                name: None,
+                mime_type: Some(mime_type.into()),
+            },
             metadata: None,
-            filename: None,
-            media_type: Some(media_type.into()),
+        }
+    }
+
+    /// Create a file part with inline bytes (base64-encoded)
+    pub fn file_bytes(bytes: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        Part::File {
+            file: FileContent {
+                bytes: Some(bytes.into()),
+                uri: None,
+                name: None,
+                mime_type: Some(mime_type.into()),
+            },
+            metadata: None,
         }
     }
 
     /// Create a structured data part
-    pub fn data(data: serde_json::Value, media_type: impl Into<String>) -> Self {
-        Self {
-            text: None,
-            raw: None,
-            url: None,
-            data: Some(data),
+    pub fn data(data: serde_json::Value) -> Self {
+        Part::Data {
+            data,
             metadata: None,
-            filename: None,
-            media_type: Some(media_type.into()),
         }
     }
 
-    /// Create a raw bytes part (base64-encoded)
-    pub fn raw(raw: impl Into<String>, media_type: impl Into<String>) -> Self {
-        Self {
-            text: None,
-            raw: Some(raw.into()),
-            url: None,
-            data: None,
-            metadata: None,
-            filename: None,
-            media_type: Some(media_type.into()),
+    /// Get the text content, if this is a text part
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Part::Text { text, .. } => Some(text),
+            _ => None,
         }
     }
 }
@@ -515,10 +539,24 @@ impl TaskState {
 
 // ---------- SendMessage response ----------
 
-/// Response from SendMessage — can be a Task or direct Message per proto
+/// Handler-level response from SendMessage — can be a Task or direct Message.
+///
+/// Uses externally tagged serialization for internal pattern matching.
+/// For the wire format (JSON-RPC result field), use [`SendMessageResult`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum SendMessageResponse {
+    Task(Task),
+    Message(Message),
+}
+
+/// Wire-format result for message/send — the value inside the JSON-RPC `result` field.
+///
+/// Uses untagged serialization to match the A2A reference SDK, which puts
+/// the Task or Message object directly in the result field without a wrapper key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum SendMessageResult {
     Task(Task),
     Message(Message),
 }
@@ -1006,7 +1044,7 @@ mod tests {
         let parsed: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.role, Role::User);
         assert_eq!(parsed.parts.len(), 1);
-        assert_eq!(parsed.parts[0].text.as_deref(), Some("hello"));
+        assert_eq!(parsed.parts[0].as_text(), Some("hello"));
 
         // Verify camelCase field names
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1034,24 +1072,72 @@ mod tests {
         let part = Part::text("hello");
         let json = serde_json::to_string(&part).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value.get("kind").unwrap().as_str().unwrap(), "text");
         assert_eq!(value.get("text").unwrap().as_str().unwrap(), "hello");
-        // Should NOT have a "type" discriminator
-        assert!(value.get("type").is_none());
     }
 
     #[test]
-    fn part_url_serialization() {
-        let part = Part::url("https://example.com/file.pdf", "application/pdf");
+    fn part_text_round_trip() {
+        let part = Part::text("hello");
+        let json = serde_json::to_string(&part).unwrap();
+        let parsed: Part = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, part);
+        assert_eq!(parsed.as_text(), Some("hello"));
+    }
+
+    #[test]
+    fn part_file_uri_serialization() {
+        let part = Part::file_uri("https://example.com/file.pdf", "application/pdf");
         let json = serde_json::to_string(&part).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value.get("kind").unwrap().as_str().unwrap(), "file");
+        let file = value.get("file").unwrap();
         assert_eq!(
-            value.get("url").unwrap().as_str().unwrap(),
+            file.get("uri").unwrap().as_str().unwrap(),
             "https://example.com/file.pdf"
         );
         assert_eq!(
-            value.get("mediaType").unwrap().as_str().unwrap(),
+            file.get("mimeType").unwrap().as_str().unwrap(),
             "application/pdf"
         );
+    }
+
+    #[test]
+    fn part_data_serialization() {
+        let part = Part::data(serde_json::json!({"key": "value"}));
+        let json = serde_json::to_string(&part).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value.get("kind").unwrap().as_str().unwrap(), "data");
+        assert_eq!(
+            value.get("data").unwrap(),
+            &serde_json::json!({"key": "value"})
+        );
+    }
+
+    #[test]
+    fn part_deserialization_from_wire_format() {
+        // Verify we can deserialize the exact wire format other SDKs produce
+        let text: Part = serde_json::from_str(r#"{"kind":"text","text":"hello"}"#).unwrap();
+        assert_eq!(text.as_text(), Some("hello"));
+
+        let file: Part = serde_json::from_str(
+            r#"{"kind":"file","file":{"uri":"https://example.com/f.pdf","mimeType":"application/pdf"}}"#,
+        )
+        .unwrap();
+        match &file {
+            Part::File { file, .. } => {
+                assert_eq!(file.uri.as_deref(), Some("https://example.com/f.pdf"));
+                assert_eq!(file.mime_type.as_deref(), Some("application/pdf"));
+            }
+            _ => panic!("expected File part"),
+        }
+
+        let data: Part =
+            serde_json::from_str(r#"{"kind":"data","data":{"k":"v"}}"#).unwrap();
+        match &data {
+            Part::Data { data, .. } => assert_eq!(data, &serde_json::json!({"k": "v"})),
+            _ => panic!("expected Data part"),
+        }
     }
 
     #[test]
@@ -1132,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn send_message_response_serialization() {
+    fn send_message_result_serialization() {
         let task = Task {
             id: "t-1".to_string(),
             context_id: "ctx-1".to_string(),
@@ -1145,10 +1231,17 @@ mod tests {
             history: None,
             metadata: None,
         };
-        let resp = SendMessageResponse::Task(task);
-        let json = serde_json::to_string(&resp).unwrap();
+
+        // SendMessageResult (wire format) serializes the Task directly — no wrapper key
+        let result = SendMessageResult::Task(task.clone());
+        let json = serde_json::to_string(&result).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(value.get("task").is_some());
+        assert!(value.get("task").is_none(), "should not have wrapper key");
+        assert_eq!(value.get("id").unwrap().as_str().unwrap(), "t-1");
+
+        // Round-trip: deserialize bare task JSON as SendMessageResult
+        let parsed: SendMessageResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, SendMessageResult::Task(task));
     }
 
     #[test]

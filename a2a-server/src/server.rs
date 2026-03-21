@@ -614,9 +614,9 @@ async fn handle_message_send(
 
                     apply_history_length(&mut task, history_length);
 
-                    // Wrap in SendMessageResponse for spec-compliant serialization
-                    let resp = SendMessageResponse::Task(task);
-                    match serde_json::to_value(resp) {
+                    // Serialize the Task directly into the JSON-RPC result field
+                    // (no wrapper key — matches the A2A reference SDK wire format)
+                    match serde_json::to_value(&task) {
                         Ok(val) => (StatusCode::OK, Json(success(req_id, val))),
                         Err(e) => (
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -630,8 +630,8 @@ async fn handle_message_send(
                     }
                 }
                 SendMessageResponse::Message(msg) => {
-                    let resp = SendMessageResponse::Message(msg);
-                    match serde_json::to_value(resp) {
+                    // Serialize the Message directly into the JSON-RPC result field
+                    match serde_json::to_value(&msg) {
                         Ok(val) => (StatusCode::OK, Json(success(req_id, val))),
                         Err(e) => (
                             StatusCode::INTERNAL_SERVER_ERROR,

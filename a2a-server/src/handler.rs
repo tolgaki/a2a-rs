@@ -136,7 +136,7 @@ impl MessageHandler for EchoHandler {
         let text = message
             .parts
             .iter()
-            .filter_map(|p| p.text.as_deref())
+            .filter_map(|p| p.as_text())
             .collect::<Vec<_>>()
             .join("\n");
 
