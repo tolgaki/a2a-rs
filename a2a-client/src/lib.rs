@@ -19,6 +19,7 @@
 //! let card = client.fetch_agent_card().await?;
 //!
 //! let message = Message {
+//!     kind: "message".to_string(),
 //!     message_id: uuid::Uuid::new_v4().to_string(),
 //!     role: Role::User,
 //!     parts: vec![Part::text("Hello")],

@@ -55,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
 
     // --- Step 3: Send a message ---
     let message = Message {
+        kind: "message".to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),
         context_id: None,
         task_id: None,

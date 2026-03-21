@@ -411,18 +411,21 @@ impl Part {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum Role {
-    #[serde(rename = "ROLE_UNSPECIFIED")]
+    #[serde(rename = "unspecified")]
     Unspecified,
-    #[serde(rename = "ROLE_USER")]
+    #[serde(rename = "user")]
     User,
-    #[serde(rename = "ROLE_AGENT")]
+    #[serde(rename = "agent")]
     Agent,
 }
 
-/// Message structure per A2A RC 1.0 proto spec
+/// Message structure per A2A RC 1.0 spec
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
+    /// Kind discriminator — always "message"
+    #[serde(default = "default_message_kind")]
+    pub kind: String,
     /// Unique message identifier
     pub message_id: String,
     /// Optional conversation context ID
@@ -444,6 +447,10 @@ pub struct Message {
     /// Optional related task IDs
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_task_ids: Option<Vec<String>>,
+}
+
+fn default_message_kind() -> String {
+    "message".to_string()
 }
 
 /// Artifact output from task processing per proto spec
@@ -472,23 +479,23 @@ pub struct Artifact {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TaskState {
-    #[serde(rename = "TASK_STATE_UNSPECIFIED")]
+    #[serde(rename = "unspecified")]
     Unspecified,
-    #[serde(rename = "TASK_STATE_SUBMITTED")]
+    #[serde(rename = "submitted")]
     Submitted,
-    #[serde(rename = "TASK_STATE_WORKING")]
+    #[serde(rename = "working")]
     Working,
-    #[serde(rename = "TASK_STATE_COMPLETED")]
+    #[serde(rename = "completed")]
     Completed,
-    #[serde(rename = "TASK_STATE_FAILED")]
+    #[serde(rename = "failed")]
     Failed,
-    #[serde(rename = "TASK_STATE_CANCELED")]
+    #[serde(rename = "canceled")]
     Canceled,
-    #[serde(rename = "TASK_STATE_INPUT_REQUIRED")]
+    #[serde(rename = "input-required")]
     InputRequired,
-    #[serde(rename = "TASK_STATE_REJECTED")]
+    #[serde(rename = "rejected")]
     Rejected,
-    #[serde(rename = "TASK_STATE_AUTH_REQUIRED")]
+    #[serde(rename = "auth-required")]
     AuthRequired,
 }
 
@@ -953,6 +960,7 @@ pub struct TaskArtifactUpdateEvent {
 /// Create a new message with text content
 pub fn new_message(role: Role, text: &str, context_id: Option<String>) -> Message {
     Message {
+        kind: "message".to_string(),
         message_id: Uuid::new_v4().to_string(),
         context_id,
         task_id: None,
@@ -1024,7 +1032,7 @@ mod tests {
     fn task_state_serialization() {
         let state = TaskState::Working;
         let json = serde_json::to_string(&state).unwrap();
-        assert_eq!(json, r#""TASK_STATE_WORKING""#);
+        assert_eq!(json, r#""working""#);
 
         let parsed: TaskState = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, TaskState::Working);
@@ -1034,7 +1042,7 @@ mod tests {
     fn role_serialization() {
         let role = Role::User;
         let json = serde_json::to_string(&role).unwrap();
-        assert_eq!(json, r#""ROLE_USER""#);
+        assert_eq!(json, r#""user""#);
     }
 
     #[test]

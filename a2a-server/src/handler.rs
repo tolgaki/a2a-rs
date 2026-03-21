@@ -144,6 +144,7 @@ impl MessageHandler for EchoHandler {
         let context_id = message.context_id.clone().unwrap_or_default();
 
         let response = Message {
+            kind: "message".to_string(),
             message_id: Uuid::new_v4().to_string(),
             context_id: message.context_id.clone(),
             task_id: None,

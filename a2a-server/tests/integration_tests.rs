@@ -39,6 +39,7 @@ async fn response_json(response: axum::response::Response) -> JsonRpcResponse {
 /// Helper to create a test message
 fn test_message(id: &str, text: &str) -> Message {
     Message {
+        kind: "message".to_string(),
         message_id: id.to_string(),
         role: Role::User,
         parts: vec![Part::text(text)],

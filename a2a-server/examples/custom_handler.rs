@@ -18,13 +18,13 @@
 //!   curl -X POST http://127.0.0.1:3000/v1/rpc \
 //!     -H "Content-Type: application/json" \
 //!     -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{
-//!       "message":{"messageId":"msg-1","role":"ROLE_USER","parts":[{"kind":"text","text":"Hello, my name is Alice"}]}}}'
+//!       "message":{"messageId":"msg-1","role":"user","parts":[{"kind":"text","text":"Hello, my name is Alice"}]}}}'
 //!
 //!   # Ask for the time
 //!   curl -X POST http://127.0.0.1:3000/v1/rpc \
 //!     -H "Content-Type: application/json" \
 //!     -d '{"jsonrpc":"2.0","id":2,"method":"message/send","params":{
-//!       "message":{"messageId":"msg-2","role":"ROLE_USER","parts":[{"kind":"text","text":"time"}]}}}'
+//!       "message":{"messageId":"msg-2","role":"user","parts":[{"kind":"text","text":"time"}]}}}'
 
 use a2a_rs_core::{
     AgentCapabilities, AgentCard, AgentInterface, AgentProvider, AgentSkill, Artifact, Message,
@@ -87,6 +87,7 @@ impl MessageHandler for GreetingAgent {
         let task_id = uuid::Uuid::new_v4().to_string();
 
         let agent_message = Message {
+            kind: "message".to_string(),
             message_id: uuid::Uuid::new_v4().to_string(),
             context_id: Some(context_id.clone()),
             task_id: Some(task_id.clone()),
@@ -202,7 +203,7 @@ async fn main() -> anyhow::Result<()> {
     println!(r#"  curl -s -X POST http://127.0.0.1:3000/v1/rpc \"#);
     println!(r#"    -H "Content-Type: application/json" \"#);
     println!(
-        r#"    -d '{{"jsonrpc":"2.0","id":1,"method":"message/send","params":{{"message":{{"messageId":"m1","role":"ROLE_USER","parts":[{{"text":"Hello, my name is Alice"}}]}}}}}}'"#
+        r#"    -d '{{"jsonrpc":"2.0","id":1,"method":"message/send","params":{{"message":{{"messageId":"m1","role":"user","parts":[{{"kind":"text","text":"Hello, my name is Alice"}}]}}}}}}'"#
     );
 
     A2aServer::new(GreetingAgent)
