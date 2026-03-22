@@ -8,8 +8,12 @@ use std::time::{Duration, Instant};
 use std::pin::Pin;
 
 use a2a_rs_core::{
-    AgentCard, GetTaskRequest, JsonRpcRequest, JsonRpcResponse, Message,
-    SendMessageConfiguration, SendMessageRequest, SendMessageResult, StreamingMessageResult, Task,
+    AgentCard, CancelTaskRequest, CreateTaskPushNotificationConfigRequest,
+    DeleteTaskPushNotificationConfigRequest, GetTaskPushNotificationConfigRequest,
+    GetTaskRequest, JsonRpcRequest, JsonRpcResponse, ListTaskPushNotificationConfigRequest,
+    ListTaskPushNotificationConfigResponse, ListTasksRequest, Message, PushNotificationConfig,
+    SendMessageConfiguration, SendMessageRequest, SendMessageResult, StreamingMessageResult,
+    SubscribeToTaskRequest, Task, TaskListResponse, TaskPushNotificationConfig,
 };
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -396,6 +400,158 @@ impl A2aClient {
         }
 
         Ok(task)
+    }
+
+    /// Poll a task by ID with a specific history length
+    pub async fn get_task(
+        &self,
+        task_id: &str,
+        history_length: Option<u32>,
+        session_token: Option<&str>,
+    ) -> Result<Task> {
+        let params = GetTaskRequest {
+            id: task_id.to_string(),
+            history_length,
+            tenant: None,
+        };
+        self.json_rpc_call("tasks/get", params, session_token).await
+    }
+
+    /// Cancel a task by ID
+    pub async fn cancel_task(&self, task_id: &str, session_token: Option<&str>) -> Result<Task> {
+        let params = CancelTaskRequest {
+            id: task_id.to_string(),
+            tenant: None,
+        };
+        self.json_rpc_call("tasks/cancel", params, session_token)
+            .await
+    }
+
+    /// List tasks with optional filters
+    pub async fn list_tasks(
+        &self,
+        request: ListTasksRequest,
+        session_token: Option<&str>,
+    ) -> Result<TaskListResponse> {
+        self.json_rpc_call("tasks/list", request, session_token)
+            .await
+    }
+
+    /// Subscribe to task updates via SSE streaming
+    pub async fn subscribe_to_task(
+        &self,
+        task_id: &str,
+        session_token: Option<&str>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamingMessageResult>> + Send>>> {
+        let rpc_url = self.get_cached_endpoint().await?;
+
+        let params = SubscribeToTaskRequest {
+            id: task_id.to_string(),
+            tenant: None,
+        };
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tasks/subscribe".into(),
+            params: Some(serde_json::to_value(&params)?),
+            id: serde_json::json!(1),
+        };
+
+        let mut req_builder = self.http.post(&rpc_url).json(&request);
+        if let Some(token) = session_token {
+            req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
+        }
+
+        let resp = req_builder.send().await?.error_for_status()?;
+
+        // Check that we got SSE back
+        let is_sse = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/event-stream"));
+
+        if !is_sse {
+            let body: JsonRpcResponse = resp.json().await?;
+            if let Some(err) = body.error {
+                anyhow::bail!("Server error {}: {}", err.code, err.message);
+            }
+            anyhow::bail!("Expected SSE stream from server");
+        }
+
+        let stream = sse_stream(resp);
+        Ok(Box::pin(stream))
+    }
+
+    /// Create a push notification configuration for a task
+    pub async fn create_push_notification_config(
+        &self,
+        task_id: &str,
+        config_id: &str,
+        config: PushNotificationConfig,
+        session_token: Option<&str>,
+    ) -> Result<TaskPushNotificationConfig> {
+        let params = CreateTaskPushNotificationConfigRequest {
+            task_id: task_id.to_string(),
+            config_id: config_id.to_string(),
+            push_notification_config: config,
+            tenant: None,
+        };
+        self.json_rpc_call("tasks/pushNotificationConfig/create", params, session_token)
+            .await
+    }
+
+    /// Get a push notification configuration
+    pub async fn get_push_notification_config(
+        &self,
+        task_id: &str,
+        config_id: &str,
+        session_token: Option<&str>,
+    ) -> Result<TaskPushNotificationConfig> {
+        let params = GetTaskPushNotificationConfigRequest {
+            id: config_id.to_string(),
+            task_id: task_id.to_string(),
+            tenant: None,
+        };
+        self.json_rpc_call("tasks/pushNotificationConfig/get", params, session_token)
+            .await
+    }
+
+    /// List push notification configurations for a task
+    pub async fn list_push_notification_configs(
+        &self,
+        task_id: &str,
+        session_token: Option<&str>,
+    ) -> Result<ListTaskPushNotificationConfigResponse> {
+        let params = ListTaskPushNotificationConfigRequest {
+            task_id: task_id.to_string(),
+            page_size: None,
+            page_token: None,
+            tenant: None,
+        };
+        self.json_rpc_call("tasks/pushNotificationConfig/list", params, session_token)
+            .await
+    }
+
+    /// Delete a push notification configuration
+    pub async fn delete_push_notification_config(
+        &self,
+        task_id: &str,
+        config_id: &str,
+        session_token: Option<&str>,
+    ) -> Result<()> {
+        let params = DeleteTaskPushNotificationConfigRequest {
+            id: config_id.to_string(),
+            task_id: task_id.to_string(),
+            tenant: None,
+        };
+        self.json_rpc_call::<_, serde_json::Value>(
+            "tasks/pushNotificationConfig/delete",
+            params,
+            session_token,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Perform interactive OAuth flow (prompts user to visit URL and paste callback)
