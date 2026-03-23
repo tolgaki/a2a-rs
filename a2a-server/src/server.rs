@@ -148,12 +148,7 @@ impl A2aServer {
                     .timeout(Duration::from_secs(30)),
             );
 
-        let sse_routes = Router::new().route(
-            "/v1/tasks/:task_id/subscribe",
-            get(handle_task_subscribe_sse),
-        );
-
-        let mut router = timed_routes.merge(sse_routes);
+        let mut router = timed_routes;
 
         if let Some(additional) = self.additional_routes {
             router = router.merge(additional);
@@ -398,60 +393,8 @@ async fn agent_card(State(state): State<AppState>) -> Json<AgentCard> {
     Json((*state.card).clone())
 }
 
-async fn handle_task_subscribe_sse(
-    State(state): State<AppState>,
-    axum::extract::Path(task_id): axum::extract::Path<String>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let mut rx = state.subscribe_events();
-    let task_store = state.task_store.clone();
-    let target_task_id = task_id;
-
-    let stream = async_stream::stream! {
-        if let Some(task) = task_store.get_flexible(&target_task_id).await {
-            if let Ok(json) = serde_json::to_string(&task) {
-                yield Ok(Event::default().data(json));
-            }
-        }
-
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    let matches = match &event {
-                        StreamResponse::Task(t) => t.id == target_task_id,
-                        StreamResponse::StatusUpdate(e) => e.task_id == target_task_id,
-                        StreamResponse::ArtifactUpdate(e) => e.task_id == target_task_id,
-                        StreamResponse::Message(_) => false,
-                    };
-                    if matches {
-                        // Serialize the inner value directly
-                        let json = match &event {
-                            StreamResponse::Task(t) => serde_json::to_string(t),
-                            StreamResponse::Message(m) => serde_json::to_string(m),
-                            StreamResponse::StatusUpdate(e) => serde_json::to_string(e),
-                            StreamResponse::ArtifactUpdate(e) => serde_json::to_string(e),
-                        };
-                        if let Ok(json) = json {
-                            yield Ok(Event::default().data(json));
-                        }
-
-                        let is_terminal = match &event {
-                            StreamResponse::Task(t) => t.status.state.is_terminal(),
-                            StreamResponse::StatusUpdate(e) => e.is_final || e.status.state.is_terminal(),
-                            _ => false,
-                        };
-                        if is_terminal {
-                            break;
-                        }
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    };
-
-    Sse::new(stream).keep_alive(KeepAlive::default())
-}
+// handle_task_subscribe_sse removed — tasks/resubscribe now returns SSE
+// directly from the /v1/rpc endpoint via handle_tasks_resubscribe.
 
 async fn handle_rpc(
     State(state): State<AppState>,
@@ -485,7 +428,7 @@ async fn handle_rpc(
         "tasks/get" => handle_tasks_get(state, req).await.into_response(),
         "tasks/list" => handle_tasks_list(state, req).await.into_response(),
         "tasks/cancel" => handle_tasks_cancel(state, req).await.into_response(),
-        "tasks/subscribe" => handle_tasks_subscribe(state, req).await.into_response(),
+        "tasks/resubscribe" => handle_tasks_resubscribe(state, req).await.into_response(),
         "tasks/pushNotificationConfig/create" => {
             handle_push_config_create(state, req).await.into_response()
         }
@@ -966,51 +909,107 @@ async fn handle_tasks_list(
     }
 }
 
-async fn handle_tasks_subscribe(
-    state: AppState,
-    req: JsonRpcRequest,
-) -> (StatusCode, Json<JsonRpcResponse>) {
+/// Handle `tasks/resubscribe` — returns SSE directly from the JSON-RPC endpoint.
+///
+/// Reconnects to an existing task's event stream. Each SSE event's `data:` is
+/// a JSON-RPC response envelope wrapping the result, same as `message/stream`.
+async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Response {
+    let req_id = req.id.clone();
+
     let params: Result<SubscribeToTaskRequest, _> =
         serde_json::from_value(req.params.unwrap_or_default());
 
-    match params {
-        Ok(p) => {
-            if state.task_store.get_flexible(&p.id).await.is_none() {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(error(
-                        req.id,
-                        errors::TASK_NOT_FOUND,
-                        "task not found",
-                        None,
-                    )),
-                );
-            }
-
-            let base_url = state.endpoint_url().trim_end_matches("/v1/rpc");
-            let subscribe_url = format!("{}/v1/tasks/{}/subscribe", base_url, p.id);
-
-            (
-                StatusCode::OK,
-                Json(success(
-                    req.id,
-                    serde_json::json!({
-                        "subscribeUrl": subscribe_url,
-                        "protocol": "sse"
-                    }),
+    let params = match params {
+        Ok(p) => p,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error(
+                    req_id,
+                    errors::INVALID_PARAMS,
+                    "invalid params",
+                    Some(serde_json::json!({"error": err.to_string()})),
                 )),
             )
+                .into_response();
         }
-        Err(err) => (
-            StatusCode::BAD_REQUEST,
-            Json(error(
-                req.id,
-                errors::INVALID_PARAMS,
-                "invalid params",
-                Some(serde_json::json!({"error": err.to_string()})),
-            )),
-        ),
-    }
+    };
+
+    // Verify the task exists
+    let task = match state.task_store.get_flexible(&params.id).await {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(error(req_id, errors::TASK_NOT_FOUND, "task not found", None)),
+            )
+                .into_response();
+        }
+    };
+
+    let target_task_id = task.id.clone();
+    let mut rx = state.subscribe_events();
+    let task_store = state.task_store.clone();
+
+    let wrap = move |value: serde_json::Value| -> String {
+        serde_json::to_string(&success(req_id.clone(), value)).unwrap_or_default()
+    };
+
+    let stream = async_stream::stream! {
+        // Yield current task snapshot
+        if let Ok(val) = serde_json::to_value(&task) {
+            yield Ok::<_, Infallible>(Event::default().data(wrap(val)));
+        }
+
+        // If already terminal, stop
+        if task.status.state.is_terminal() {
+            return;
+        }
+
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let matches = match &event {
+                        StreamResponse::Task(t) => t.id == target_task_id,
+                        StreamResponse::StatusUpdate(e) => e.task_id == target_task_id,
+                        StreamResponse::ArtifactUpdate(e) => e.task_id == target_task_id,
+                        StreamResponse::Message(m) => {
+                            m.context_id.as_ref().is_some_and(|ctx| {
+                                task_store.get(&target_task_id).now_or_never()
+                                    .flatten()
+                                    .is_some_and(|t| t.context_id == *ctx)
+                            })
+                        }
+                    };
+
+                    if matches {
+                        let val = match &event {
+                            StreamResponse::Task(t) => serde_json::to_value(t),
+                            StreamResponse::Message(m) => serde_json::to_value(m),
+                            StreamResponse::StatusUpdate(e) => serde_json::to_value(e),
+                            StreamResponse::ArtifactUpdate(e) => serde_json::to_value(e),
+                        };
+                        if let Ok(val) = val {
+                            yield Ok(Event::default().data(wrap(val)));
+                        }
+
+                        let is_terminal = match &event {
+                            StreamResponse::Task(t) => t.status.state.is_terminal(),
+                            StreamResponse::StatusUpdate(e) => e.is_final || e.status.state.is_terminal(),
+                            _ => false,
+                        };
+                        if is_terminal {
+                            break;
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
 async fn handle_get_extended_agent_card(

@@ -452,7 +452,7 @@ impl A2aClient {
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".into(),
-            method: "tasks/subscribe".into(),
+            method: "tasks/resubscribe".into(),
             params: Some(serde_json::to_value(&params)?),
             id: serde_json::json!(1),
         };
