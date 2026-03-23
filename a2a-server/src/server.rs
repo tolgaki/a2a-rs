@@ -33,7 +33,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::future::FutureExt;
-use futures::stream::Stream;
 use tokio::sync::broadcast;
 use tracing::info;
 
@@ -501,6 +500,11 @@ async fn handle_message_send(
         .as_ref()
         .and_then(|c| c.blocking)
         .unwrap_or(false);
+    let return_immediately = params
+        .configuration
+        .as_ref()
+        .and_then(|c| c.return_immediately)
+        .unwrap_or(false);
     let history_length = params.configuration.as_ref().and_then(|c| c.history_length);
 
     match state
@@ -515,8 +519,8 @@ async fn handle_message_send(
                     state.task_store.insert(task.clone()).await;
                     state.broadcast_event(StreamResponse::Task(task.clone()));
 
-                    // If blocking mode, wait for task to reach terminal state
-                    if blocking && !task.status.state.is_terminal() {
+                    // If blocking mode and not returnImmediately, wait for terminal state
+                    if blocking && !return_immediately && !task.status.state.is_terminal() {
                         let task_id = task.id.clone();
                         let mut rx = state.subscribe_events();
 

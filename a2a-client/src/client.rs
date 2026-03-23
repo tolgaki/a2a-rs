@@ -545,12 +545,23 @@ impl A2aClient {
             task_id: task_id.to_string(),
             tenant: None,
         };
-        self.json_rpc_call::<_, serde_json::Value>(
-            "tasks/pushNotificationConfig/delete",
-            params,
-            session_token,
-        )
-        .await?;
+        // Delete may return null result; use direct call instead of json_rpc_call
+        let rpc_url = self.get_cached_endpoint().await?;
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tasks/pushNotificationConfig/delete".into(),
+            params: Some(serde_json::to_value(params)?),
+            id: serde_json::json!(1),
+        };
+        let mut req_builder = self.http.post(rpc_url).json(&request);
+        if let Some(token) = session_token {
+            req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
+        }
+        let mut resp: JsonRpcResponse =
+            req_builder.send().await?.error_for_status()?.json().await?;
+        if let Some(err) = resp.error.take() {
+            anyhow::bail!("Server error {}: {}", err.code, err.message);
+        }
         Ok(())
     }
 

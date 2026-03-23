@@ -187,15 +187,20 @@ impl TaskStore {
             .skip(offset)
             .take(page_size as usize)
             .map(|mut task| {
-                // Optionally trim history
-                if let Some(len) = params.history_length {
-                    if let Some(ref mut history) = task.history {
-                        let keep = len as usize;
-                        if history.len() > keep {
-                            *history = history.iter().rev().take(keep).cloned().collect();
-                            history.reverse();
+                // Optionally trim/omit history
+                match params.history_length {
+                    Some(0) => {
+                        task.history = None;
+                    }
+                    Some(n) => {
+                        if let Some(ref mut history) = task.history {
+                            let keep = n as usize;
+                            if history.len() > keep {
+                                *history = history.split_off(history.len() - keep);
+                            }
                         }
                     }
+                    None => {}
                 }
                 // Optionally exclude artifacts
                 if params.include_artifacts == Some(false) {

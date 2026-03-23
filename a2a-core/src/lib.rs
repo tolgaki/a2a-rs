@@ -715,6 +715,10 @@ pub struct SendMessageConfiguration {
     /// Wait for task completion (default: false)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocking: Option<bool>,
+    /// Return immediately without waiting for completion (default: false).
+    /// When true, the server returns the task in its current state even if non-terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_immediately: Option<bool>,
 }
 
 /// Parameters for tasks/get operation
