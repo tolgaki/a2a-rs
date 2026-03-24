@@ -482,7 +482,7 @@ impl A2aClient {
             anyhow::bail!("Expected SSE stream from server");
         }
 
-        let stream = check_sse_error_stream(sse_stream(resp)).await?;
+        let stream = check_sse_error_stream(sse_stream(resp, self.config.protocol_version)).await?;
         Ok(stream)
     }
 
@@ -640,7 +640,7 @@ impl A2aClient {
 
         // Check if the first SSE event is an error (some servers return 200 + SSE
         // with an error event for non-existent tasks)
-        let stream = check_sse_error_stream(sse_stream(resp)).await?;
+        let stream = check_sse_error_stream(sse_stream(resp, self.config.protocol_version)).await?;
         Ok(stream)
     }
 
@@ -872,6 +872,7 @@ pub fn generate_random_string(length: usize) -> String {
 /// data when the stream ends.
 fn sse_stream(
     resp: reqwest::Response,
+    version: ProtocolVersion,
 ) -> impl Stream<Item = Result<StreamingMessageResult>> + Send {
     async_stream::try_stream! {
         use tokio_stream::StreamExt;
@@ -910,6 +911,14 @@ fn sse_stream(
                         }
 
                         if let Some(result) = rpc_resp.result {
+                            let result = if version == ProtocolVersion::V0_3 {
+                                let wrapped = compat::wrap_v03_result_as_v10(result);
+                                let mut converted = wrapped;
+                                compat::response_v03_to_v10(&mut converted);
+                                converted
+                            } else {
+                                result
+                            };
                             let event: StreamingMessageResult = serde_json::from_value(result)?;
                             yield event;
                         }
@@ -933,6 +942,14 @@ fn sse_stream(
                     }
 
                     if let Some(result) = rpc_resp.result {
+                        let result = if version == ProtocolVersion::V0_3 {
+                            let wrapped = compat::wrap_v03_result_as_v10(result);
+                            let mut converted = wrapped;
+                            compat::response_v03_to_v10(&mut converted);
+                            converted
+                        } else {
+                            result
+                        };
                         let event: StreamingMessageResult = serde_json::from_value(result)?;
                         yield event;
                     }

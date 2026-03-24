@@ -16,6 +16,16 @@ where
 {
     Option::<Vec<T>>::deserialize(deserializer).map(|v| v.unwrap_or_default())
 }
+
+/// Deserialize a field that may be null, missing, or a map as HashMap<K, V>.
+fn nullable_map<'de, D, K, V>(deserializer: D) -> Result<HashMap<K, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    K: Deserialize<'de> + std::cmp::Eq + std::hash::Hash,
+    V: Deserialize<'de>,
+{
+    Option::<HashMap<K, V>>::deserialize(deserializer).map(|v| v.unwrap_or_default())
+}
 use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: &str = "1.0";
@@ -31,7 +41,7 @@ pub struct AgentCard {
     /// Agent description (required in RC 1.0)
     pub description: String,
     /// Supported transport interfaces (contains endpoint URLs)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_vec")]
     pub supported_interfaces: Vec<AgentInterface>,
     /// Provider/organization information
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -45,19 +55,19 @@ pub struct AgentCard {
     #[serde(default)]
     pub capabilities: AgentCapabilities,
     /// Named authentication schemes (map from scheme name to scheme)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_map")]
     pub security_schemes: HashMap<String, SecurityScheme>,
     /// Required auth per operation
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_vec")]
     pub security_requirements: Vec<SecurityRequirement>,
     /// Default accepted input MIME types
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_vec")]
     pub default_input_modes: Vec<String>,
     /// Default output MIME types
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_vec")]
     pub default_output_modes: Vec<String>,
     /// Agent capabilities/functions
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_vec")]
     pub skills: Vec<AgentSkill>,
     /// Cryptographic signatures for verification
     #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "nullable_vec")]
@@ -291,19 +301,19 @@ pub struct AgentSkill {
     /// Capability description
     pub description: String,
     /// Classification tags
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_vec")]
     pub tags: Vec<String>,
     /// Example prompts or inputs
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_vec")]
     pub examples: Vec<String>,
     /// Accepted input MIME types
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_vec")]
     pub input_modes: Vec<String>,
     /// Produced output MIME types
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_vec")]
     pub output_modes: Vec<String>,
     /// Security requirements for this skill
-    #[serde(default)]
+    #[serde(default, deserialize_with = "nullable_vec")]
     pub security_requirements: Vec<SecurityRequirement>,
 }
 
@@ -399,6 +409,19 @@ impl<'de> Deserialize<'de> for Part {
                 data: data.clone(),
                 metadata,
             })
+        } else if obj.contains_key("raw") || obj.contains_key("url") {
+            // Proto-style: raw/url as top-level fields (not nested under file)
+            let file = FileContent {
+                bytes: obj.get("raw").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                uri: obj.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                name: obj.get("filename").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                mime_type: obj
+                    .get("mediaType")
+                    .or_else(|| obj.get("mimeType"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            };
+            Ok(Part::File { file, metadata })
         } else if obj.contains_key("kind") {
             // v0.3 compatibility: handle kind-discriminated parts
             let kind = obj["kind"].as_str().unwrap_or("");
