@@ -6,6 +6,16 @@ use serde::{Deserialize, Serialize};
 pub mod compat;
 
 use std::collections::HashMap;
+
+/// Deserialize a field that may be null, missing, or an array as Vec<T>.
+/// Handles the common case where servers send `"field": null` instead of omitting it.
+fn nullable_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(|v| v.unwrap_or_default())
+}
 use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: &str = "1.0";
@@ -50,7 +60,7 @@ pub struct AgentCard {
     #[serde(default)]
     pub skills: Vec<AgentSkill>,
     /// Cryptographic signatures for verification
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "nullable_vec")]
     pub signatures: Vec<AgentCardSignature>,
     /// Icon URL for the agent
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -254,7 +264,7 @@ pub struct AgentCapabilities {
     pub push_notifications: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extended_agent_card: Option<bool>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "nullable_vec")]
     pub extensions: Vec<AgentExtension>,
 }
 
@@ -531,7 +541,7 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     /// Extension URIs
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "nullable_vec")]
     pub extensions: Vec<String>,
     /// Optional related task IDs
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -572,7 +582,7 @@ pub struct Artifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     /// Extension URIs
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "nullable_vec")]
     pub extensions: Vec<String>,
 }
 

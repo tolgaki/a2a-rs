@@ -482,8 +482,8 @@ impl A2aClient {
             anyhow::bail!("Expected SSE stream from server");
         }
 
-        let stream = sse_stream(resp);
-        Ok(Box::pin(stream))
+        let stream = check_sse_error_stream(sse_stream(resp)).await?;
+        Ok(stream)
     }
 
     /// Poll a task by ID
@@ -638,8 +638,10 @@ impl A2aClient {
             anyhow::bail!("Expected SSE stream from server");
         }
 
-        let stream = sse_stream(resp);
-        Ok(Box::pin(stream))
+        // Check if the first SSE event is an error (some servers return 200 + SSE
+        // with an error event for non-existent tasks)
+        let stream = check_sse_error_stream(sse_stream(resp)).await?;
+        Ok(stream)
     }
 
     /// Create a push notification configuration for a task
@@ -937,6 +939,46 @@ fn sse_stream(
                 }
                 break;
             }
+        }
+    }
+}
+
+/// Check if the first SSE event is an error, and if so, return Err immediately.
+/// Otherwise, return the stream with the first event re-prepended.
+async fn check_sse_error_stream(
+    stream: impl Stream<Item = Result<StreamingMessageResult>> + Send + 'static,
+) -> Result<Pin<Box<dyn Stream<Item = Result<StreamingMessageResult>> + Send>>> {
+    use tokio_stream::StreamExt;
+
+    let mut stream = Box::pin(stream);
+
+    // Try to get the first item with a short timeout
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await;
+
+    match first {
+        Ok(Some(Err(e))) => {
+            // First event is an error — return it as the function error
+            Err(e)
+        }
+        Ok(Some(Ok(item))) => {
+            // First event is a valid result — prepend it to the stream
+            let rest = stream;
+            let combined = async_stream::stream! {
+                yield Ok(item);
+                let mut rest = rest;
+                while let Some(item) = rest.next().await {
+                    yield item;
+                }
+            };
+            Ok(Box::pin(combined))
+        }
+        Ok(None) => {
+            // Stream ended immediately
+            anyhow::bail!("SSE stream ended without events")
+        }
+        Err(_) => {
+            // Timeout reading first event — return the stream as-is
+            Ok(stream)
         }
     }
 }
