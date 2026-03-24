@@ -25,7 +25,7 @@ fn role_v03_to_v10(s: &str) -> &str {
 }
 
 /// TaskState string mapping: v1.0 → v0.3
-fn state_v10_to_v03(s: &str) -> &str {
+pub fn state_v10_to_v03(s: &str) -> &str {
     match s {
         "TASK_STATE_SUBMITTED" => "submitted",
         "TASK_STATE_WORKING" => "working",
