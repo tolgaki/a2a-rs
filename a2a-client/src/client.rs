@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use std::pin::Pin;
 
 use a2a_rs_core::{
-    AgentCard, CancelTaskRequest, CreateTaskPushNotificationConfigRequest,
+    compat, AgentCard, CancelTaskRequest, CreateTaskPushNotificationConfigRequest,
     DeleteTaskPushNotificationConfigRequest, GetTaskPushNotificationConfigRequest,
     GetTaskRequest, JsonRpcRequest, JsonRpcResponse, ListTaskPushNotificationConfigRequest,
     ListTaskPushNotificationConfigResponse, ListTasksRequest, Message, PushNotificationConfig,
@@ -39,6 +39,16 @@ pub enum ProtocolVersion {
     V0_3,
 }
 
+/// Transport binding
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Transport {
+    /// JSON-RPC over HTTP POST
+    #[default]
+    JsonRpc,
+    /// HTTP+JSON REST binding
+    Rest,
+}
+
 /// Client configuration
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -58,6 +68,8 @@ pub struct ClientConfig {
     pub http_client: Option<Client>,
     /// Protocol version (default: V1_0)
     pub protocol_version: ProtocolVersion,
+    /// Transport binding (default: JsonRpc)
+    pub transport: Transport,
 }
 
 impl Default for ClientConfig {
@@ -70,6 +82,7 @@ impl Default for ClientConfig {
             endpoint_url: None,
             http_client: None,
             protocol_version: ProtocolVersion::V1_0,
+            transport: Transport::JsonRpc,
         }
     }
 }
@@ -294,10 +307,17 @@ impl A2aClient {
     ) -> Result<R> {
         let rpc_url = self.get_cached_endpoint().await?;
 
+        let mut params_val = serde_json::to_value(params)?;
+
+        // v0.3: transform params to lowercase enums, add kind to parts
+        if self.config.protocol_version == ProtocolVersion::V0_3 {
+            compat::request_v10_to_v03(&mut params_val);
+        }
+
         let request = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             method: self.wire_method(method).into(),
-            params: Some(serde_json::to_value(params)?),
+            params: Some(params_val),
             id: serde_json::json!(1),
         };
 
@@ -316,11 +336,69 @@ impl A2aClient {
             anyhow::bail!("Server error {}: {}", err.code, err.message);
         }
 
-        resp.result
-            .as_ref()
-            .map(|v| serde_json::from_value(v.clone()))
-            .transpose()?
-            .ok_or_else(|| anyhow!("Server returned no result"))
+        let result = resp
+            .result
+            .ok_or_else(|| anyhow!("Server returned no result"))?;
+
+        // v0.3: transform response from lowercase enums back to SCREAMING_SNAKE,
+        // and wrap kind-discriminated result into externally tagged format
+        if self.config.protocol_version == ProtocolVersion::V0_3 {
+            let wrapped = compat::wrap_v03_result_as_v10(result.clone());
+            let mut converted = wrapped;
+            compat::response_v03_to_v10(&mut converted);
+            Ok(serde_json::from_value(converted)?)
+        } else {
+            Ok(serde_json::from_value(result)?)
+        }
+    }
+
+    /// Make a REST API call (HTTP+JSON binding)
+    async fn rest_call<P: Serialize, R: for<'de> Deserialize<'de>>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<P>,
+        session_token: Option<&str>,
+    ) -> Result<R> {
+        let base = self.get_cached_endpoint().await?;
+        let url = format!("{}{}", base.trim_end_matches('/'), path);
+
+        let mut req_builder = self.http.request(method, &url);
+        req_builder = req_builder.header("A2A-Version", "1.0");
+        if let Some(token) = session_token {
+            req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
+        }
+        if let Some(body) = body {
+            req_builder = req_builder.json(&body);
+        }
+
+        let resp = req_builder.send().await?.error_for_status()?;
+        let result: R = resp.json().await?;
+        Ok(result)
+    }
+
+    /// Make a REST SSE streaming call
+    async fn rest_sse_call<P: Serialize>(
+        &self,
+        path: &str,
+        body: Option<P>,
+        session_token: Option<&str>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamingMessageResult>> + Send>>> {
+        let base = self.get_cached_endpoint().await?;
+        let url = format!("{}{}", base.trim_end_matches('/'), path);
+
+        let mut req_builder = self.http.post(&url);
+        req_builder = req_builder.header("A2A-Version", "1.0");
+        if let Some(token) = session_token {
+            req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
+        }
+        if let Some(body) = body {
+            req_builder = req_builder.json(&body);
+        }
+
+        let resp = req_builder.send().await?.error_for_status()?;
+        let stream = sse_stream_raw(resp);
+        Ok(Box::pin(stream))
     }
 
     /// Send a message to the agent and receive a response (Task or Message)
@@ -336,6 +414,11 @@ impl A2aClient {
             configuration,
             metadata: None,
         };
+        if self.config.transport == Transport::Rest {
+            return self
+                .rest_call(reqwest::Method::POST, "/message:send", Some(params), session_token)
+                .await;
+        }
         self.json_rpc_call("message/send", params, session_token)
             .await
     }
@@ -351,14 +434,20 @@ impl A2aClient {
         session_token: Option<&str>,
         configuration: Option<SendMessageConfiguration>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamingMessageResult>> + Send>>> {
-        let rpc_url = self.get_cached_endpoint().await?;
-
         let params = SendMessageRequest {
             tenant: None,
             message,
             configuration,
             metadata: None,
         };
+
+        if self.config.transport == Transport::Rest {
+            return self
+                .rest_sse_call("/message:stream", Some(params), session_token)
+                .await;
+        }
+
+        let rpc_url = self.get_cached_endpoint().await?;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".into(),
@@ -449,6 +538,15 @@ impl A2aClient {
         history_length: Option<u32>,
         session_token: Option<&str>,
     ) -> Result<Task> {
+        if self.config.transport == Transport::Rest {
+            let mut path = format!("/tasks/{}", urlencoding::encode(task_id));
+            if let Some(hl) = history_length {
+                path = format!("{}?historyLength={}", path, hl);
+            }
+            return self
+                .rest_call::<(), Task>(reqwest::Method::GET, &path, None, session_token)
+                .await;
+        }
         let params = GetTaskRequest {
             id: task_id.to_string(),
             history_length,
@@ -459,6 +557,12 @@ impl A2aClient {
 
     /// Cancel a task by ID
     pub async fn cancel_task(&self, task_id: &str, session_token: Option<&str>) -> Result<Task> {
+        if self.config.transport == Transport::Rest {
+            let path = format!("/tasks/{}:cancel", urlencoding::encode(task_id));
+            return self
+                .rest_call::<(), Task>(reqwest::Method::DELETE, &path, None, session_token)
+                .await;
+        }
         let params = CancelTaskRequest {
             id: task_id.to_string(),
             tenant: None,
@@ -473,6 +577,11 @@ impl A2aClient {
         request: ListTasksRequest,
         session_token: Option<&str>,
     ) -> Result<TaskListResponse> {
+        if self.config.transport == Transport::Rest {
+            return self
+                .rest_call(reqwest::Method::GET, "/tasks", Some(request), session_token)
+                .await;
+        }
         self.json_rpc_call("tasks/list", request, session_token)
             .await
     }
@@ -483,6 +592,13 @@ impl A2aClient {
         task_id: &str,
         session_token: Option<&str>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamingMessageResult>> + Send>>> {
+        if self.config.transport == Transport::Rest {
+            let path = format!("/tasks/{}/subscribe", urlencoding::encode(task_id));
+            return self
+                .rest_sse_call::<()>(&path, None, session_token)
+                .await;
+        }
+
         let rpc_url = self.get_cached_endpoint().await?;
 
         let params = SubscribeToTaskRequest {
@@ -818,6 +934,57 @@ fn sse_stream(
                         let event: StreamingMessageResult = serde_json::from_value(result)?;
                         yield event;
                     }
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Parse an SSE response where events contain raw results (no JSON-RPC wrapper).
+/// Used for REST transport where SSE data is the result directly.
+fn sse_stream_raw(
+    resp: reqwest::Response,
+) -> impl Stream<Item = Result<StreamingMessageResult>> + Send {
+    async_stream::try_stream! {
+        use tokio_stream::StreamExt;
+
+        let mut bytes_stream = resp.bytes_stream();
+        let mut buffer = String::new();
+        let mut data_buf: Vec<String> = Vec::new();
+
+        loop {
+            let done = match bytes_stream.next().await {
+                Some(Ok(chunk)) => {
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    false
+                }
+                Some(Err(e)) => Err(e)?,
+                None => true,
+            };
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if line.is_empty() {
+                    if !data_buf.is_empty() {
+                        let data = data_buf.join("\n");
+                        data_buf.clear();
+                        let event: StreamingMessageResult = serde_json::from_str(&data)?;
+                        yield event;
+                    }
+                } else if let Some(value) = line.strip_prefix("data:") {
+                    let value = value.strip_prefix(' ').unwrap_or(value);
+                    data_buf.push(value.to_string());
+                }
+            }
+
+            if done {
+                if !data_buf.is_empty() {
+                    let data = data_buf.join("\n");
+                    let event: StreamingMessageResult = serde_json::from_str(&data)?;
+                    yield event;
                 }
                 break;
             }

@@ -36,7 +36,7 @@
 mod client;
 
 // Re-export the main client types
-pub use client::{A2aClient, ClientConfig, OAuthConfig, ProtocolVersion};
+pub use client::{A2aClient, ClientConfig, OAuthConfig, ProtocolVersion, Transport};
 
 // Re-export utility functions for advanced usage
 pub use client::{generate_code_challenge, generate_code_verifier, generate_random_string};

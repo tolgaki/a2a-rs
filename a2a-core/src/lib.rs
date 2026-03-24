@@ -3,6 +3,8 @@
 //! Aligned with the authoritative proto definition (specification/a2a.proto).
 
 use serde::{Deserialize, Serialize};
+pub mod compat;
+
 use std::collections::HashMap;
 use uuid::Uuid;
 
