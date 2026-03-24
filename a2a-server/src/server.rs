@@ -18,8 +18,8 @@ use a2a_rs_core::{
     CreateTaskPushNotificationConfigRequest, DeleteTaskPushNotificationConfigRequest,
     GetTaskPushNotificationConfigRequest, GetTaskRequest, JsonRpcRequest, JsonRpcResponse,
     ListTaskPushNotificationConfigRequest, ListTasksRequest, SendMessageRequest,
-    SendMessageResponse, StreamResponse, SubscribeToTaskRequest, Task, TaskState,
-    TaskStatusUpdateEvent, PROTOCOL_VERSION,
+    SendMessageResponse, SendMessageResult, StreamResponse, StreamingMessageResult,
+    SubscribeToTaskRequest, Task, TaskState, TaskStatusUpdateEvent, PROTOCOL_VERSION,
 };
 
 const A2A_VERSION_HEADER: &str = "A2A-Version";
@@ -415,34 +415,38 @@ async fn handle_rpc(
         .and_then(|extractor| extractor(&headers));
 
     match req.method.as_str() {
-        // Spec method names per JSON-RPC binding
-        "message/send" => handle_message_send(state, req, auth_context)
+        // Accept both v1.0 PascalCase and v0.3 kebab-case method names
+        "SendMessage" | "message/send" => handle_message_send(state, req, auth_context)
             .await
             .into_response(),
-        "message/stream" => {
+        "SendStreamingMessage" | "message/stream" => {
             handle_message_stream(state, req, headers, auth_context)
                 .await
                 .into_response()
         }
-        "tasks/get" => handle_tasks_get(state, req).await.into_response(),
-        "tasks/list" => handle_tasks_list(state, req).await.into_response(),
-        "tasks/cancel" => handle_tasks_cancel(state, req).await.into_response(),
-        "tasks/resubscribe" => handle_tasks_resubscribe(state, req).await.into_response(),
-        "tasks/pushNotificationConfig/create" => {
+        "GetTask" | "tasks/get" => handle_tasks_get(state, req).await.into_response(),
+        "ListTasks" | "tasks/list" => handle_tasks_list(state, req).await.into_response(),
+        "CancelTask" | "tasks/cancel" => handle_tasks_cancel(state, req).await.into_response(),
+        "SubscribeToTask" | "tasks/resubscribe" => {
+            handle_tasks_resubscribe(state, req).await.into_response()
+        }
+        "CreateTaskPushNotificationConfig" | "tasks/pushNotificationConfig/create" => {
             handle_push_config_create(state, req).await.into_response()
         }
-        "tasks/pushNotificationConfig/get" => {
+        "GetTaskPushNotificationConfig" | "tasks/pushNotificationConfig/get" => {
             handle_push_config_get(state, req).await.into_response()
         }
-        "tasks/pushNotificationConfig/list" => {
+        "ListTaskPushNotificationConfigs" | "tasks/pushNotificationConfig/list" => {
             handle_push_config_list(state, req).await.into_response()
         }
-        "tasks/pushNotificationConfig/delete" => {
+        "DeleteTaskPushNotificationConfig" | "tasks/pushNotificationConfig/delete" => {
             handle_push_config_delete(state, req).await.into_response()
         }
-        "agentCard/getExtended" => handle_get_extended_agent_card(state, req, auth_context)
-            .await
-            .into_response(),
+        "GetExtendedAgentCard" | "agentCard/getExtended" => {
+            handle_get_extended_agent_card(state, req, auth_context)
+                .await
+                .into_response()
+        }
         _ => (
             StatusCode::NOT_FOUND,
             Json(error(
@@ -577,9 +581,8 @@ async fn handle_message_send(
 
                     apply_history_length(&mut task, history_length);
 
-                    // Serialize the Task directly into the JSON-RPC result field
-                    // (no wrapper key — matches the A2A reference SDK wire format)
-                    match serde_json::to_value(&task) {
+                    // Serialize via SendMessageResult for externally tagged wrapping
+                    match serde_json::to_value(SendMessageResult::Task(task.clone())) {
                         Ok(val) => (StatusCode::OK, Json(success(req_id, val))),
                         Err(e) => (
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -593,8 +596,8 @@ async fn handle_message_send(
                     }
                 }
                 SendMessageResponse::Message(msg) => {
-                    // Serialize the Message directly into the JSON-RPC result field
-                    match serde_json::to_value(&msg) {
+                    // Serialize via SendMessageResult for externally tagged wrapping
+                    match serde_json::to_value(SendMessageResult::Message(msg)) {
                         Ok(val) => (StatusCode::OK, Json(success(req_id, val))),
                         Err(e) => (
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -703,8 +706,8 @@ async fn handle_message_stream(
     };
 
     let stream = async_stream::stream! {
-        // Yield initial task
-        if let Ok(val) = serde_json::to_value(&task) {
+        // Yield initial task via StreamingMessageResult for proper tagging
+        if let Ok(val) = serde_json::to_value(StreamingMessageResult::Task(task)) {
             yield Ok::<_, Infallible>(Event::default().data(wrap(val)));
         }
 
@@ -725,12 +728,12 @@ async fn handle_message_stream(
                     };
 
                     if matches {
-                        // Serialize the inner value directly (not the StreamResponse wrapper)
-                        let val = match &event {
-                            StreamResponse::Task(t) => serde_json::to_value(t),
-                            StreamResponse::Message(m) => serde_json::to_value(m),
-                            StreamResponse::StatusUpdate(e) => serde_json::to_value(e),
-                            StreamResponse::ArtifactUpdate(e) => serde_json::to_value(e),
+                        // Serialize via StreamingMessageResult for proper external tagging
+                        let val = match event.clone() {
+                            StreamResponse::Task(t) => serde_json::to_value(StreamingMessageResult::Task(t)),
+                            StreamResponse::Message(m) => serde_json::to_value(StreamingMessageResult::Message(m)),
+                            StreamResponse::StatusUpdate(e) => serde_json::to_value(StreamingMessageResult::StatusUpdate(e)),
+                            StreamResponse::ArtifactUpdate(e) => serde_json::to_value(StreamingMessageResult::ArtifactUpdate(e)),
                         };
                         if let Ok(val) = val {
                             yield Ok(Event::default().data(wrap(val)));
@@ -960,8 +963,8 @@ async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Respo
     };
 
     let stream = async_stream::stream! {
-        // Yield current task snapshot
-        if let Ok(val) = serde_json::to_value(&task) {
+        // Yield current task snapshot via StreamingMessageResult
+        if let Ok(val) = serde_json::to_value(StreamingMessageResult::Task(task.clone())) {
             yield Ok::<_, Infallible>(Event::default().data(wrap(val)));
         }
 
@@ -987,11 +990,11 @@ async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Respo
                     };
 
                     if matches {
-                        let val = match &event {
-                            StreamResponse::Task(t) => serde_json::to_value(t),
-                            StreamResponse::Message(m) => serde_json::to_value(m),
-                            StreamResponse::StatusUpdate(e) => serde_json::to_value(e),
-                            StreamResponse::ArtifactUpdate(e) => serde_json::to_value(e),
+                        let val = match event.clone() {
+                            StreamResponse::Task(t) => serde_json::to_value(StreamingMessageResult::Task(t)),
+                            StreamResponse::Message(m) => serde_json::to_value(StreamingMessageResult::Message(m)),
+                            StreamResponse::StatusUpdate(e) => serde_json::to_value(StreamingMessageResult::StatusUpdate(e)),
+                            StreamResponse::ArtifactUpdate(e) => serde_json::to_value(StreamingMessageResult::ArtifactUpdate(e)),
                         };
                         if let Ok(val) = val {
                             yield Ok(Event::default().data(wrap(val)));

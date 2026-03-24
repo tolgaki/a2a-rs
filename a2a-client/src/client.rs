@@ -29,6 +29,16 @@ use tracing::{info, warn};
 /// Duration to cache the agent card (5 minutes)
 const AGENT_CARD_CACHE_TTL: Duration = Duration::from_secs(300);
 
+/// Protocol version for A2A wire format
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProtocolVersion {
+    /// A2A v1.0 — PascalCase methods, SCREAMING_SNAKE enums, externally tagged results
+    #[default]
+    V1_0,
+    /// A2A v0.3 — kebab-case methods, lowercase enums, kind discriminators
+    V0_3,
+}
+
 /// Client configuration
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -46,6 +56,8 @@ pub struct ClientConfig {
     ///
     /// If `None`, a default `reqwest::Client` is created.
     pub http_client: Option<Client>,
+    /// Protocol version (default: V1_0)
+    pub protocol_version: ProtocolVersion,
 }
 
 impl Default for ClientConfig {
@@ -57,6 +69,7 @@ impl Default for ClientConfig {
             oauth: None,
             endpoint_url: None,
             http_client: None,
+            protocol_version: ProtocolVersion::V1_0,
         }
     }
 }
@@ -251,6 +264,27 @@ impl A2aClient {
         card.endpoint()
     }
 
+    /// Resolve the wire method name based on protocol version
+    fn wire_method<'a>(&self, method: &'a str) -> &'a str {
+        if self.config.protocol_version == ProtocolVersion::V0_3 {
+            return method;
+        }
+        match method {
+            "message/send" => "SendMessage",
+            "message/stream" => "SendStreamingMessage",
+            "tasks/get" => "GetTask",
+            "tasks/cancel" => "CancelTask",
+            "tasks/list" => "ListTasks",
+            "tasks/resubscribe" => "SubscribeToTask",
+            "tasks/pushNotificationConfig/create" => "CreateTaskPushNotificationConfig",
+            "tasks/pushNotificationConfig/get" => "GetTaskPushNotificationConfig",
+            "tasks/pushNotificationConfig/list" => "ListTaskPushNotificationConfigs",
+            "tasks/pushNotificationConfig/delete" => "DeleteTaskPushNotificationConfig",
+            "agentCard/getExtended" => "GetExtendedAgentCard",
+            _ => method,
+        }
+    }
+
     /// Send a JSON-RPC request and parse the response
     async fn json_rpc_call<P: Serialize, R: for<'de> Deserialize<'de>>(
         &self,
@@ -262,7 +296,7 @@ impl A2aClient {
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".into(),
-            method: method.into(),
+            method: self.wire_method(method).into(),
             params: Some(serde_json::to_value(params)?),
             id: serde_json::json!(1),
         };
@@ -270,6 +304,9 @@ impl A2aClient {
         let mut req_builder = self.http.post(rpc_url).json(&request);
         if let Some(token) = session_token {
             req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
+        }
+        if self.config.protocol_version == ProtocolVersion::V1_0 {
+            req_builder = req_builder.header("A2A-Version", "1.0");
         }
 
         let mut resp: JsonRpcResponse =
@@ -325,7 +362,7 @@ impl A2aClient {
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".into(),
-            method: "message/stream".into(),
+            method: self.wire_method("message/stream").into(),
             params: Some(serde_json::to_value(&params)?),
             id: serde_json::json!(1),
         };
@@ -333,6 +370,9 @@ impl A2aClient {
         let mut req_builder = self.http.post(&rpc_url).json(&request);
         if let Some(token) = session_token {
             req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
+        }
+        if self.config.protocol_version == ProtocolVersion::V1_0 {
+            req_builder = req_builder.header("A2A-Version", "1.0");
         }
 
         let resp = req_builder.send().await?.error_for_status()?;
@@ -452,7 +492,7 @@ impl A2aClient {
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".into(),
-            method: "tasks/resubscribe".into(),
+            method: self.wire_method("tasks/resubscribe").into(),
             params: Some(serde_json::to_value(&params)?),
             id: serde_json::json!(1),
         };
@@ -460,6 +500,9 @@ impl A2aClient {
         let mut req_builder = self.http.post(&rpc_url).json(&request);
         if let Some(token) = session_token {
             req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
+        }
+        if self.config.protocol_version == ProtocolVersion::V1_0 {
+            req_builder = req_builder.header("A2A-Version", "1.0");
         }
 
         let resp = req_builder.send().await?.error_for_status()?;
@@ -549,13 +592,16 @@ impl A2aClient {
         let rpc_url = self.get_cached_endpoint().await?;
         let request = JsonRpcRequest {
             jsonrpc: "2.0".into(),
-            method: "tasks/pushNotificationConfig/delete".into(),
+            method: self.wire_method("tasks/pushNotificationConfig/delete").into(),
             params: Some(serde_json::to_value(params)?),
             id: serde_json::json!(1),
         };
         let mut req_builder = self.http.post(rpc_url).json(&request);
         if let Some(token) = session_token {
             req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
+        }
+        if self.config.protocol_version == ProtocolVersion::V1_0 {
+            req_builder = req_builder.header("A2A-Version", "1.0");
         }
         let mut resp: JsonRpcResponse =
             req_builder.send().await?.error_for_status()?.json().await?;

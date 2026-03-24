@@ -297,42 +297,129 @@ pub struct AgentSkill {
 
 // ---------- Content Parts ----------
 
-/// Part content — internally tagged enum using `kind` as the discriminator.
+/// Part content — flat proto-JSON format per A2A v1.0 spec.
 ///
-/// Matches the A2A reference SDK wire format:
-/// - `{"kind": "text", "text": "..."}`
-/// - `{"kind": "file", "file": {"uri": "...", "mimeType": "..."}}`
-/// - `{"kind": "data", "data": {...}}`
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind")]
+/// Uses custom serialization to produce flat JSON without a `kind` discriminator:
+/// - `Part::Text` → `{"text": "..."}`
+/// - `Part::File` → `{"file": {"uri": "...", "mimeType": "..."}}`
+/// - `Part::Data` → `{"data": {...}}`
+///
+/// Deserialization detects the variant by which field is present.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Part {
     /// Text content part
-    #[serde(rename = "text")]
     Text {
         /// The text content
         text: String,
         /// Part-level metadata
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
     },
     /// File content part (inline bytes or URI reference)
-    #[serde(rename = "file")]
     File {
         /// File content
         file: FileContent,
         /// Part-level metadata
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
     },
     /// Structured data part
-    #[serde(rename = "data")]
     Data {
         /// Structured JSON data
         data: serde_json::Value,
         /// Part-level metadata
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
     },
+}
+
+impl Serialize for Part {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            Part::Text { text, metadata } => {
+                let mut map = serializer.serialize_map(None)?;
+                map.serialize_entry("text", text)?;
+                if let Some(m) = metadata {
+                    map.serialize_entry("metadata", m)?;
+                }
+                map.end()
+            }
+            Part::File { file, metadata } => {
+                let mut map = serializer.serialize_map(None)?;
+                map.serialize_entry("file", file)?;
+                if let Some(m) = metadata {
+                    map.serialize_entry("metadata", m)?;
+                }
+                map.end()
+            }
+            Part::Data { data, metadata } => {
+                let mut map = serializer.serialize_map(None)?;
+                map.serialize_entry("data", data)?;
+                if let Some(m) = metadata {
+                    map.serialize_entry("metadata", m)?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Part {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected object for Part"))?;
+        let metadata = obj.get("metadata").cloned();
+
+        if let Some(text) = obj.get("text") {
+            Ok(Part::Text {
+                text: text
+                    .as_str()
+                    .ok_or_else(|| serde::de::Error::custom("text must be a string"))?
+                    .to_string(),
+                metadata,
+            })
+        } else if let Some(file) = obj.get("file") {
+            let file: FileContent = serde_json::from_value(file.clone())
+                .map_err(serde::de::Error::custom)?;
+            Ok(Part::File { file, metadata })
+        } else if let Some(data) = obj.get("data") {
+            Ok(Part::Data {
+                data: data.clone(),
+                metadata,
+            })
+        } else if obj.contains_key("kind") {
+            // v0.3 compatibility: handle kind-discriminated parts
+            let kind = obj["kind"].as_str().unwrap_or("");
+            match kind {
+                "text" => Ok(Part::Text {
+                    text: obj
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    metadata,
+                }),
+                "file" => {
+                    let file: FileContent = serde_json::from_value(
+                        obj.get("file").cloned().unwrap_or_default(),
+                    )
+                    .map_err(serde::de::Error::custom)?;
+                    Ok(Part::File { file, metadata })
+                }
+                "data" => Ok(Part::Data {
+                    data: obj.get("data").cloned().unwrap_or_default(),
+                    metadata,
+                }),
+                _ => Err(serde::de::Error::custom(format!(
+                    "unknown part kind: {kind}"
+                ))),
+            }
+        } else {
+            Err(serde::de::Error::custom(
+                "Part must have text, file, or data field",
+            ))
+        }
+    }
 }
 
 /// File content — either inline bytes or a URI reference.
@@ -411,11 +498,11 @@ impl Part {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum Role {
-    #[serde(rename = "unspecified")]
+    #[serde(rename = "ROLE_UNSPECIFIED")]
     Unspecified,
-    #[serde(rename = "user")]
+    #[serde(rename = "ROLE_USER")]
     User,
-    #[serde(rename = "agent")]
+    #[serde(rename = "ROLE_AGENT")]
     Agent,
 }
 
@@ -423,8 +510,8 @@ pub enum Role {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
-    /// Kind discriminator — always "message"
-    #[serde(default = "default_message_kind")]
+    /// Kind discriminator — always "message" (skipped in v1.0 wire format)
+    #[serde(default = "default_message_kind", skip_serializing)]
     pub kind: String,
     /// Unique message identifier
     pub message_id: String,
@@ -491,23 +578,23 @@ pub struct Artifact {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TaskState {
-    #[serde(rename = "unspecified")]
+    #[serde(rename = "TASK_STATE_UNSPECIFIED")]
     Unspecified,
-    #[serde(rename = "submitted")]
+    #[serde(rename = "TASK_STATE_SUBMITTED")]
     Submitted,
-    #[serde(rename = "working")]
+    #[serde(rename = "TASK_STATE_WORKING")]
     Working,
-    #[serde(rename = "completed")]
+    #[serde(rename = "TASK_STATE_COMPLETED")]
     Completed,
-    #[serde(rename = "failed")]
+    #[serde(rename = "TASK_STATE_FAILED")]
     Failed,
-    #[serde(rename = "canceled")]
+    #[serde(rename = "TASK_STATE_CANCELED")]
     Canceled,
-    #[serde(rename = "input-required")]
+    #[serde(rename = "TASK_STATE_INPUT_REQUIRED")]
     InputRequired,
-    #[serde(rename = "rejected")]
+    #[serde(rename = "TASK_STATE_REJECTED")]
     Rejected,
-    #[serde(rename = "auth-required")]
+    #[serde(rename = "TASK_STATE_AUTH_REQUIRED")]
     AuthRequired,
 }
 
@@ -529,8 +616,8 @@ pub struct TaskStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
-    /// Kind discriminator — always "task"
-    #[serde(default = "default_task_kind")]
+    /// Kind discriminator — always "task" (skipped in v1.0 wire format)
+    #[serde(default = "default_task_kind", skip_serializing)]
     pub kind: String,
     /// Unique task identifier (UUID)
     pub id: String,
@@ -574,10 +661,10 @@ pub enum SendMessageResponse {
 
 /// Wire-format result for message/send — the value inside the JSON-RPC `result` field.
 ///
-/// Uses untagged serialization to match the A2A reference SDK, which puts
-/// the Task or Message object directly in the result field without a wrapper key.
+/// Uses externally tagged serialization per v1.0 proto-JSON:
+/// - `{"task": {...}}` or `{"message": {...}}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
+#[serde(rename_all = "camelCase")]
 pub enum SendMessageResult {
     Task(Task),
     Message(Message),
@@ -942,8 +1029,8 @@ pub enum StreamResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskStatusUpdateEvent {
-    /// Kind discriminator — always "status-update"
-    #[serde(default = "default_status_update_kind")]
+    /// Kind discriminator — always "status-update" (skipped in v1.0 wire format)
+    #[serde(default = "default_status_update_kind", skip_serializing)]
     pub kind: String,
     /// Task identifier
     pub task_id: String,
@@ -963,8 +1050,8 @@ pub struct TaskStatusUpdateEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskArtifactUpdateEvent {
-    /// Kind discriminator — always "artifact-update"
-    #[serde(default = "default_artifact_update_kind")]
+    /// Kind discriminator — always "artifact-update" (skipped in v1.0 wire format)
+    #[serde(default = "default_artifact_update_kind", skip_serializing)]
     pub kind: String,
     /// Task identifier
     pub task_id: String,
@@ -985,10 +1072,10 @@ pub struct TaskArtifactUpdateEvent {
 
 /// Wire-format result for streaming events — the value inside each SSE JSON-RPC `result` field.
 ///
-/// Uses untagged serialization; each variant is distinguished by its `kind` field and
-/// unique required fields.
+/// Uses externally tagged serialization per v1.0 proto-JSON:
+/// - `{"statusUpdate": {...}}`, `{"artifactUpdate": {...}}`, `{"task": {...}}`, `{"message": {...}}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
+#[serde(rename_all = "camelCase")]
 pub enum StreamingMessageResult {
     StatusUpdate(TaskStatusUpdateEvent),
     ArtifactUpdate(TaskArtifactUpdateEvent),
@@ -1074,7 +1161,7 @@ mod tests {
     fn task_state_serialization() {
         let state = TaskState::Working;
         let json = serde_json::to_string(&state).unwrap();
-        assert_eq!(json, r#""working""#);
+        assert_eq!(json, r#""TASK_STATE_WORKING""#);
 
         let parsed: TaskState = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, TaskState::Working);
@@ -1084,7 +1171,7 @@ mod tests {
     fn role_serialization() {
         let role = Role::User;
         let json = serde_json::to_string(&role).unwrap();
-        assert_eq!(json, r#""user""#);
+        assert_eq!(json, r#""ROLE_USER""#);
     }
 
     #[test]
@@ -1122,7 +1209,8 @@ mod tests {
         let part = Part::text("hello");
         let json = serde_json::to_string(&part).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value.get("kind").unwrap().as_str().unwrap(), "text");
+        // v1.0: no kind field, just text
+        assert!(value.get("kind").is_none());
         assert_eq!(value.get("text").unwrap().as_str().unwrap(), "hello");
     }
 
@@ -1140,7 +1228,7 @@ mod tests {
         let part = Part::file_uri("https://example.com/file.pdf", "application/pdf");
         let json = serde_json::to_string(&part).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value.get("kind").unwrap().as_str().unwrap(), "file");
+        assert!(value.get("kind").is_none());
         let file = value.get("file").unwrap();
         assert_eq!(
             file.get("uri").unwrap().as_str().unwrap(),
@@ -1157,7 +1245,7 @@ mod tests {
         let part = Part::data(serde_json::json!({"key": "value"}));
         let json = serde_json::to_string(&part).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value.get("kind").unwrap().as_str().unwrap(), "data");
+        assert!(value.get("kind").is_none());
         assert_eq!(
             value.get("data").unwrap(),
             &serde_json::json!({"key": "value"})
@@ -1166,12 +1254,12 @@ mod tests {
 
     #[test]
     fn part_deserialization_from_wire_format() {
-        // Verify we can deserialize the exact wire format other SDKs produce
-        let text: Part = serde_json::from_str(r#"{"kind":"text","text":"hello"}"#).unwrap();
+        // v1.0 flat format (no kind)
+        let text: Part = serde_json::from_str(r#"{"text":"hello"}"#).unwrap();
         assert_eq!(text.as_text(), Some("hello"));
 
         let file: Part = serde_json::from_str(
-            r#"{"kind":"file","file":{"uri":"https://example.com/f.pdf","mimeType":"application/pdf"}}"#,
+            r#"{"file":{"uri":"https://example.com/f.pdf","mimeType":"application/pdf"}}"#,
         )
         .unwrap();
         match &file {
@@ -1182,12 +1270,16 @@ mod tests {
             _ => panic!("expected File part"),
         }
 
-        let data: Part =
-            serde_json::from_str(r#"{"kind":"data","data":{"k":"v"}}"#).unwrap();
+        let data: Part = serde_json::from_str(r#"{"data":{"k":"v"}}"#).unwrap();
         match &data {
             Part::Data { data, .. } => assert_eq!(data, &serde_json::json!({"k": "v"})),
             _ => panic!("expected Data part"),
         }
+
+        // v0.3 kind-discriminated format (backward compat)
+        let text_v03: Part =
+            serde_json::from_str(r#"{"kind":"text","text":"hello v03"}"#).unwrap();
+        assert_eq!(text_v03.as_text(), Some("hello v03"));
     }
 
     #[test]
@@ -1283,14 +1375,15 @@ mod tests {
             metadata: None,
         };
 
-        // SendMessageResult (wire format) serializes the Task directly — no wrapper key
+        // SendMessageResult (wire format) uses externally tagged: {"task": {...}}
         let result = SendMessageResult::Task(task.clone());
         let json = serde_json::to_string(&result).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(value.get("task").is_none(), "should not have wrapper key");
-        assert_eq!(value.get("id").unwrap().as_str().unwrap(), "t-1");
+        assert!(value.get("task").is_some(), "should have task wrapper key");
+        let inner = value.get("task").unwrap();
+        assert_eq!(inner.get("id").unwrap().as_str().unwrap(), "t-1");
 
-        // Round-trip: deserialize bare task JSON as SendMessageResult
+        // Round-trip
         let parsed: SendMessageResult = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, SendMessageResult::Task(task));
     }
