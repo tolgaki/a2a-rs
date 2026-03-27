@@ -60,11 +60,11 @@ fn state_v03_to_v10(s: &str) -> &str {
 ///
 /// Transforms:
 /// - `ROLE_USER` → `user`, `ROLE_AGENT` → `agent`
-/// - Adds `kind` field to parts and messages
+///
+/// Note: `kind` fields on Part, Message, Task, and streaming events are now
+/// always serialized by a2a-rs-core, so no post-hoc injection is needed.
 pub fn request_v10_to_v03(val: &mut Value) {
     convert_roles(val, role_v10_to_v03);
-    add_kind_to_parts(val);
-    add_kind_to_messages(val);
 }
 
 /// Convert v0.3 response to v1.0 format after receiving.
@@ -113,59 +113,6 @@ fn convert_states(val: &mut Value, f: fn(&str) -> &str) {
         Value::Array(arr) => {
             for v in arr {
                 convert_states(v, f);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn add_kind_to_parts(val: &mut Value) {
-    match val {
-        Value::Object(map) => {
-            // If this looks like a Part (has text/file/data but no kind), add kind
-            if map.contains_key("text") && !map.contains_key("kind") && !map.contains_key("role") {
-                map.insert("kind".to_string(), Value::String("text".to_string()));
-            } else if map.contains_key("file") && !map.contains_key("kind") {
-                map.insert("kind".to_string(), Value::String("file".to_string()));
-            } else if map.contains_key("data")
-                && !map.contains_key("kind")
-                && !map.contains_key("role")
-                && !map.contains_key("status")
-            {
-                map.insert("kind".to_string(), Value::String("data".to_string()));
-            }
-            for v in map.values_mut() {
-                add_kind_to_parts(v);
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr {
-                add_kind_to_parts(v);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Add `kind` to message objects (has `role` + `messageId` + `parts`) and task objects.
-fn add_kind_to_messages(val: &mut Value) {
-    match val {
-        Value::Object(map) => {
-            if map.contains_key("role") && map.contains_key("messageId") && !map.contains_key("kind") {
-                map.insert("kind".to_string(), Value::String("message".to_string()));
-            }
-            if map.contains_key("status") && map.contains_key("contextId") && map.contains_key("id")
-                && !map.contains_key("kind") && !map.contains_key("taskId")
-            {
-                map.insert("kind".to_string(), Value::String("task".to_string()));
-            }
-            for v in map.values_mut() {
-                add_kind_to_messages(v);
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr {
-                add_kind_to_messages(v);
             }
         }
         _ => {}

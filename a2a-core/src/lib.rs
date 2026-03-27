@@ -358,6 +358,7 @@ impl Serialize for Part {
         match self {
             Part::Text { text, metadata } => {
                 let mut map = serializer.serialize_map(None)?;
+                map.serialize_entry("kind", "text")?;
                 map.serialize_entry("text", text)?;
                 if let Some(m) = metadata {
                     map.serialize_entry("metadata", m)?;
@@ -366,6 +367,7 @@ impl Serialize for Part {
             }
             Part::File { file, metadata } => {
                 let mut map = serializer.serialize_map(None)?;
+                map.serialize_entry("kind", "file")?;
                 map.serialize_entry("file", file)?;
                 if let Some(m) = metadata {
                     map.serialize_entry("metadata", m)?;
@@ -374,6 +376,7 @@ impl Serialize for Part {
             }
             Part::Data { data, metadata } => {
                 let mut map = serializer.serialize_map(None)?;
+                map.serialize_entry("kind", "data")?;
                 map.serialize_entry("data", data)?;
                 if let Some(m) = metadata {
                     map.serialize_entry("metadata", m)?;
@@ -545,8 +548,8 @@ pub enum Role {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
-    /// Kind discriminator — always "message" (skipped in v1.0 wire format)
-    #[serde(default = "default_message_kind", skip_serializing)]
+    /// Kind discriminator — always "message"
+    #[serde(default = "default_message_kind")]
     pub kind: String,
     /// Unique message identifier
     pub message_id: String,
@@ -651,8 +654,8 @@ pub struct TaskStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
-    /// Kind discriminator — always "task" (skipped in v1.0 wire format)
-    #[serde(default = "default_task_kind", skip_serializing)]
+    /// Kind discriminator — always "task"
+    #[serde(default = "default_task_kind")]
     pub kind: String,
     /// Unique task identifier (UUID)
     pub id: String,
@@ -1064,8 +1067,8 @@ pub enum StreamResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskStatusUpdateEvent {
-    /// Kind discriminator — always "status-update" (skipped in v1.0 wire format)
-    #[serde(default = "default_status_update_kind", skip_serializing)]
+    /// Kind discriminator — always "status-update"
+    #[serde(default = "default_status_update_kind")]
     pub kind: String,
     /// Task identifier
     pub task_id: String,
@@ -1085,8 +1088,8 @@ pub struct TaskStatusUpdateEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskArtifactUpdateEvent {
-    /// Kind discriminator — always "artifact-update" (skipped in v1.0 wire format)
-    #[serde(default = "default_artifact_update_kind", skip_serializing)]
+    /// Kind discriminator — always "artifact-update"
+    #[serde(default = "default_artifact_update_kind")]
     pub kind: String,
     /// Task identifier
     pub task_id: String,
@@ -1244,8 +1247,7 @@ mod tests {
         let part = Part::text("hello");
         let json = serde_json::to_string(&part).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        // v1.0: no kind field, just text
-        assert!(value.get("kind").is_none());
+        assert_eq!(value.get("kind").unwrap().as_str().unwrap(), "text");
         assert_eq!(value.get("text").unwrap().as_str().unwrap(), "hello");
     }
 
@@ -1263,7 +1265,7 @@ mod tests {
         let part = Part::file_uri("https://example.com/file.pdf", "application/pdf");
         let json = serde_json::to_string(&part).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(value.get("kind").is_none());
+        assert_eq!(value.get("kind").unwrap().as_str().unwrap(), "file");
         let file = value.get("file").unwrap();
         assert_eq!(
             file.get("uri").unwrap().as_str().unwrap(),
@@ -1280,7 +1282,7 @@ mod tests {
         let part = Part::data(serde_json::json!({"key": "value"}));
         let json = serde_json::to_string(&part).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(value.get("kind").is_none());
+        assert_eq!(value.get("kind").unwrap().as_str().unwrap(), "data");
         assert_eq!(
             value.get("data").unwrap(),
             &serde_json::json!({"key": "value"})
