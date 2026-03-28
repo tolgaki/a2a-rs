@@ -307,12 +307,7 @@ impl A2aClient {
     ) -> Result<R> {
         let rpc_url = self.get_cached_endpoint().await?;
 
-        let mut params_val = serde_json::to_value(params)?;
-
-        // v0.3: transform params to lowercase enums, add kind to parts
-        if self.config.protocol_version == ProtocolVersion::V0_3 {
-            compat::request_v10_to_v03(&mut params_val);
-        }
+        let params_val = serde_json::to_value(params)?;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".into(),
@@ -340,13 +335,10 @@ impl A2aClient {
             .result
             .ok_or_else(|| anyhow!("Server returned no result"))?;
 
-        // v0.3: transform response from lowercase enums back to SCREAMING_SNAKE,
-        // and wrap kind-discriminated result into externally tagged format
+        // v0.3: wrap kind-discriminated result into externally tagged format
         if self.config.protocol_version == ProtocolVersion::V0_3 {
-            let wrapped = compat::wrap_v03_result_as_v10(result.clone());
-            let mut converted = wrapped;
-            compat::response_v03_to_v10(&mut converted);
-            Ok(serde_json::from_value(converted)?)
+            let wrapped = compat::wrap_v03_result_as_v10(result);
+            Ok(serde_json::from_value(wrapped)?)
         } else {
             Ok(serde_json::from_value(result)?)
         }
@@ -912,10 +904,7 @@ fn sse_stream(
 
                         if let Some(result) = rpc_resp.result {
                             let result = if version == ProtocolVersion::V0_3 {
-                                let wrapped = compat::wrap_v03_result_as_v10(result);
-                                let mut converted = wrapped;
-                                compat::response_v03_to_v10(&mut converted);
-                                converted
+                                compat::wrap_v03_result_as_v10(result)
                             } else {
                                 result
                             };
@@ -943,10 +932,7 @@ fn sse_stream(
 
                     if let Some(result) = rpc_resp.result {
                         let result = if version == ProtocolVersion::V0_3 {
-                            let wrapped = compat::wrap_v03_result_as_v10(result);
-                            let mut converted = wrapped;
-                            compat::response_v03_to_v10(&mut converted);
-                            converted
+                            compat::wrap_v03_result_as_v10(result)
                         } else {
                             result
                         };

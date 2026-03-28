@@ -532,15 +532,16 @@ impl Part {
 
 // ---------- Messages, Tasks, Artifacts ----------
 
-/// Message role per proto spec
+/// Message role — serializes as v0.3 style ("user"/"agent") for broad compat,
+/// deserializes from both v0.3 and v1.0 protobuf style ("ROLE_USER"/"ROLE_AGENT").
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum Role {
-    #[serde(rename = "ROLE_UNSPECIFIED")]
+    #[serde(rename = "unspecified", alias = "ROLE_UNSPECIFIED")]
     Unspecified,
-    #[serde(rename = "ROLE_USER")]
+    #[serde(rename = "user", alias = "ROLE_USER")]
     User,
-    #[serde(rename = "ROLE_AGENT")]
+    #[serde(rename = "agent", alias = "ROLE_AGENT")]
     Agent,
 }
 
@@ -612,27 +613,28 @@ pub struct Artifact {
     pub extensions: Vec<String>,
 }
 
-/// Task lifecycle state per proto spec
+/// Task lifecycle state — serializes as v0.3 style for broad compat,
+/// deserializes from both v0.3 and v1.0 protobuf style.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TaskState {
-    #[serde(rename = "TASK_STATE_UNSPECIFIED")]
+    #[serde(rename = "unspecified", alias = "TASK_STATE_UNSPECIFIED")]
     Unspecified,
-    #[serde(rename = "TASK_STATE_SUBMITTED")]
+    #[serde(rename = "submitted", alias = "TASK_STATE_SUBMITTED")]
     Submitted,
-    #[serde(rename = "TASK_STATE_WORKING")]
+    #[serde(rename = "working", alias = "TASK_STATE_WORKING")]
     Working,
-    #[serde(rename = "TASK_STATE_COMPLETED")]
+    #[serde(rename = "completed", alias = "TASK_STATE_COMPLETED")]
     Completed,
-    #[serde(rename = "TASK_STATE_FAILED")]
+    #[serde(rename = "failed", alias = "TASK_STATE_FAILED")]
     Failed,
-    #[serde(rename = "TASK_STATE_CANCELED")]
+    #[serde(rename = "canceled", alias = "TASK_STATE_CANCELED")]
     Canceled,
-    #[serde(rename = "TASK_STATE_INPUT_REQUIRED")]
+    #[serde(rename = "input-required", alias = "TASK_STATE_INPUT_REQUIRED")]
     InputRequired,
-    #[serde(rename = "TASK_STATE_REJECTED")]
+    #[serde(rename = "rejected", alias = "TASK_STATE_REJECTED")]
     Rejected,
-    #[serde(rename = "TASK_STATE_AUTH_REQUIRED")]
+    #[serde(rename = "auth-required", alias = "TASK_STATE_AUTH_REQUIRED")]
     AuthRequired,
 }
 
@@ -1199,9 +1201,14 @@ mod tests {
     fn task_state_serialization() {
         let state = TaskState::Working;
         let json = serde_json::to_string(&state).unwrap();
-        assert_eq!(json, r#""TASK_STATE_WORKING""#);
+        assert_eq!(json, r#""working""#);
 
+        // v0.3 style round-trips
         let parsed: TaskState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, TaskState::Working);
+
+        // v1.0 protobuf style still deserializes via alias
+        let parsed: TaskState = serde_json::from_str(r#""TASK_STATE_WORKING""#).unwrap();
         assert_eq!(parsed, TaskState::Working);
     }
 
@@ -1209,7 +1216,11 @@ mod tests {
     fn role_serialization() {
         let role = Role::User;
         let json = serde_json::to_string(&role).unwrap();
-        assert_eq!(json, r#""ROLE_USER""#);
+        assert_eq!(json, r#""user""#);
+
+        // v1.0 protobuf style still deserializes via alias
+        let parsed: Role = serde_json::from_str(r#""ROLE_USER""#).unwrap();
+        assert_eq!(parsed, Role::User);
     }
 
     #[test]
