@@ -453,7 +453,20 @@ async fn handle_rpc(
     };
 
     // Recover the request id early so every error envelope references it.
+    // Per JSON-RPC 2.0, id MUST be a String, Number, or Null.
     let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    if !id.is_null() && !id.is_string() && !id.is_number() {
+        return (
+            StatusCode::OK,
+            Json(error(
+                serde_json::Value::Null,
+                errors::INVALID_REQUEST,
+                "Invalid request: id must be a string, number, or null",
+                None,
+            )),
+        )
+            .into_response();
+    }
 
     // JSON-RPC request must be a JSON object.
     if !value.is_object() {
@@ -655,6 +668,43 @@ async fn handle_message_send(
                     // Store the task and broadcast event
                     state.task_store.insert(task.clone()).await;
                     state.broadcast_event(StreamResponse::Task(task.clone()));
+
+                    // Auto-complete: if the handler opts in and the task is
+                    // non-terminal, schedule a background transition to Completed.
+                    if !task.status.state.is_terminal() {
+                        if let Some(delay) = state.handler.auto_complete_delay() {
+                            let ts = state.task_store.clone();
+                            let tx = state.event_tx.clone();
+                            let tid = task.id.clone();
+                            let ctx = task.context_id.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(delay).await;
+                                let completed = ts
+                                    .update_flexible(&tid, |t| {
+                                        if !t.status.state.is_terminal() {
+                                            t.status.state = TaskState::Completed;
+                                            t.status.timestamp = Some(a2a_rs_core::now_iso8601());
+                                            Ok(())
+                                        } else {
+                                            Err(0) // already terminal, skip
+                                        }
+                                    })
+                                    .await;
+                                if let Some(Ok(t)) = completed {
+                                    let _ = tx.send(StreamResponse::StatusUpdate(
+                                        TaskStatusUpdateEvent {
+                                            kind: "status-update".to_string(),
+                                            task_id: t.id.clone(),
+                                            context_id: ctx,
+                                            status: t.status.clone(),
+                                            is_final: true,
+                                            metadata: None,
+                                        },
+                                    ));
+                                }
+                            });
+                        }
+                    }
 
                     // If blocking mode and not returnImmediately, wait for terminal state
                     if blocking && !return_immediately && !task.status.state.is_terminal() {

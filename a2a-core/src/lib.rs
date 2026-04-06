@@ -28,6 +28,44 @@ where
 }
 use uuid::Uuid;
 
+/// Deserialize a timestamp that may be an i64 (epoch millis) or an ISO 8601 string.
+fn deserialize_timestamp_flexible<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+    let val = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match val {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(n)) => n
+            .as_i64()
+            .filter(|v| *v >= 0)
+            .map(|v| Ok(Some(v)))
+            .unwrap_or_else(|| {
+                Err(de::Error::custom(
+                    "timestamp must be a non-negative integer",
+                ))
+            }),
+        Some(serde_json::Value::String(s)) => {
+            // Try epoch millis as string first, then ISO 8601
+            if let Ok(ms) = s.parse::<i64>() {
+                if ms < 0 {
+                    return Err(de::Error::custom("timestamp must be non-negative"));
+                }
+                Ok(Some(ms))
+            } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s) {
+                Ok(Some(dt.timestamp_millis()))
+            } else {
+                Err(de::Error::custom(format!(
+                    "invalid timestamp: expected epoch millis or ISO 8601, got '{}'",
+                    s
+                )))
+            }
+        }
+        Some(_) => Err(de::Error::custom("timestamp must be a number or string")),
+    }
+}
+
 pub const PROTOCOL_VERSION: &str = "1.0";
 
 // ---------- Agent Card ----------
@@ -548,16 +586,16 @@ impl Part {
 
 // ---------- Messages, Tasks, Artifacts ----------
 
-/// Message role — serializes as v0.3 style ("user"/"agent") for broad compat,
-/// deserializes from both v0.3 and v1.0 protobuf style ("ROLE_USER"/"ROLE_AGENT").
+/// Message role — serializes as v1.0 proto style ("ROLE_USER"/"ROLE_AGENT"),
+/// deserializes from both v1.0 and v0.3 style ("user"/"agent").
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum Role {
-    #[serde(rename = "unspecified", alias = "ROLE_UNSPECIFIED")]
+    #[serde(rename = "ROLE_UNSPECIFIED", alias = "unspecified")]
     Unspecified,
-    #[serde(rename = "user", alias = "ROLE_USER")]
+    #[serde(rename = "ROLE_USER", alias = "user")]
     User,
-    #[serde(rename = "agent", alias = "ROLE_AGENT")]
+    #[serde(rename = "ROLE_AGENT", alias = "agent")]
     Agent,
 }
 
@@ -637,28 +675,28 @@ pub struct Artifact {
     pub extensions: Vec<String>,
 }
 
-/// Task lifecycle state — serializes as v0.3 style for broad compat,
-/// deserializes from both v0.3 and v1.0 protobuf style.
+/// Task lifecycle state — serializes as v1.0 proto style ("TASK_STATE_COMPLETED" etc.),
+/// deserializes from both v1.0 and v0.3 style ("completed", "input-required", etc.).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TaskState {
-    #[serde(rename = "unspecified", alias = "TASK_STATE_UNSPECIFIED")]
+    #[serde(rename = "TASK_STATE_UNSPECIFIED", alias = "unspecified")]
     Unspecified,
-    #[serde(rename = "submitted", alias = "TASK_STATE_SUBMITTED")]
+    #[serde(rename = "TASK_STATE_SUBMITTED", alias = "submitted")]
     Submitted,
-    #[serde(rename = "working", alias = "TASK_STATE_WORKING")]
+    #[serde(rename = "TASK_STATE_WORKING", alias = "working")]
     Working,
-    #[serde(rename = "completed", alias = "TASK_STATE_COMPLETED")]
+    #[serde(rename = "TASK_STATE_COMPLETED", alias = "completed")]
     Completed,
-    #[serde(rename = "failed", alias = "TASK_STATE_FAILED")]
+    #[serde(rename = "TASK_STATE_FAILED", alias = "failed")]
     Failed,
-    #[serde(rename = "canceled", alias = "TASK_STATE_CANCELED")]
+    #[serde(rename = "TASK_STATE_CANCELED", alias = "canceled")]
     Canceled,
-    #[serde(rename = "input-required", alias = "TASK_STATE_INPUT_REQUIRED")]
+    #[serde(rename = "TASK_STATE_INPUT_REQUIRED", alias = "input-required")]
     InputRequired,
-    #[serde(rename = "rejected", alias = "TASK_STATE_REJECTED")]
+    #[serde(rename = "TASK_STATE_REJECTED", alias = "rejected")]
     Rejected,
-    #[serde(rename = "auth-required", alias = "TASK_STATE_AUTH_REQUIRED")]
+    #[serde(rename = "TASK_STATE_AUTH_REQUIRED", alias = "auth-required")]
     AuthRequired,
 }
 
@@ -916,8 +954,12 @@ pub struct ListTasksRequest {
     /// History depth per task
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_length: Option<u32>,
-    /// Filter by status timestamp after (ISO 8601 or millis)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Filter by status timestamp after (accepts ISO 8601 string or epoch millis)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_timestamp_flexible"
+    )]
     pub status_timestamp_after: Option<i64>,
     /// Include artifacts in response
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1225,14 +1267,14 @@ mod tests {
     fn task_state_serialization() {
         let state = TaskState::Working;
         let json = serde_json::to_string(&state).unwrap();
-        assert_eq!(json, r#""working""#);
+        assert_eq!(json, r#""TASK_STATE_WORKING""#);
 
-        // v0.3 style round-trips
+        // v1.0 proto style round-trips
         let parsed: TaskState = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, TaskState::Working);
 
-        // v1.0 protobuf style still deserializes via alias
-        let parsed: TaskState = serde_json::from_str(r#""TASK_STATE_WORKING""#).unwrap();
+        // v0.3 style still deserializes via alias
+        let parsed: TaskState = serde_json::from_str(r#""working""#).unwrap();
         assert_eq!(parsed, TaskState::Working);
     }
 
@@ -1240,10 +1282,10 @@ mod tests {
     fn role_serialization() {
         let role = Role::User;
         let json = serde_json::to_string(&role).unwrap();
-        assert_eq!(json, r#""user""#);
+        assert_eq!(json, r#""ROLE_USER""#);
 
-        // v1.0 protobuf style still deserializes via alias
-        let parsed: Role = serde_json::from_str(r#""ROLE_USER""#).unwrap();
+        // v0.3 style still deserializes via alias
+        let parsed: Role = serde_json::from_str(r#""user""#).unwrap();
         assert_eq!(parsed, Role::User);
     }
 

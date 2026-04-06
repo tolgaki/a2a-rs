@@ -85,7 +85,8 @@ async fn test_message_send() {
 
     // Verify the task was created
     let task = extract_task(rpc_response.result.unwrap());
-    assert_eq!(task.status.state, TaskState::Completed);
+    // EchoHandler now returns Working (auto-completes after delay)
+    assert_eq!(task.status.state, TaskState::Working);
     assert!(!task.id.is_empty());
 }
 
@@ -331,13 +332,14 @@ async fn test_task_cancel() {
     let rpc_response = response_json(response).await;
     let task = extract_task(rpc_response.result.unwrap());
 
-    // Echo handler tasks complete immediately, so cancel should fail
+    // EchoHandler returns Working; cancel should succeed before auto-complete fires
     let request = rpc_request("tasks/cancel", json!({ "id": task.id }));
     let response = router.oneshot(request).await.unwrap();
     let rpc_response = response_json(response).await;
-
-    // Should error because task is already completed
-    assert!(rpc_response.error.is_some());
+    assert!(
+        rpc_response.error.is_none(),
+        "cancel should succeed on Working task"
+    );
 }
 
 #[tokio::test]

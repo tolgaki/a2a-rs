@@ -19,10 +19,12 @@ async fn main() -> anyhow::Result<()> {
     println!("Starting A2A Echo Server on http://127.0.0.1:8080");
     println!("Agent card: http://127.0.0.1:8080/.well-known/agent-card.json");
     println!("Health:     http://127.0.0.1:8080/health");
+    println!("JSON-RPC:   POST http://127.0.0.1:8080/");
 
     A2aServer::echo()
         .bind("127.0.0.1:8080")
         .expect("valid bind address")
+        .rpc_path("/")
         .run()
         .await
 }

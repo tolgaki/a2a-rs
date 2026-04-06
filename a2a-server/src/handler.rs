@@ -106,6 +106,17 @@ pub trait MessageHandler: Send + Sync {
     async fn extended_agent_card(&self, _base_url: &str, _auth: &AuthContext) -> Option<AgentCard> {
         None
     }
+
+    /// Optional: Delay before the server auto-completes a non-terminal task.
+    ///
+    /// When a handler returns a task in a non-terminal state (e.g. Working),
+    /// the server can optionally schedule a background transition to the
+    /// terminal state after this delay. Return `None` (the default) to
+    /// disable auto-completion — the handler is fully responsible for
+    /// completing tasks via the event channel.
+    fn auto_complete_delay(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 /// A simple echo handler for testing and demos
@@ -160,7 +171,7 @@ impl MessageHandler for EchoHandler {
             id: task_id,
             context_id,
             status: TaskStatus {
-                state: TaskState::Completed,
+                state: TaskState::Working,
                 message: None,
                 timestamp: Some(now_iso8601()),
             },
@@ -177,7 +188,8 @@ impl MessageHandler for EchoHandler {
 
         AgentCard {
             name: self.agent_name.clone(),
-            description: "Simple echo agent for testing A2A protocol".to_string(),
+            description: "Echo agent — reflects input, auto-completes after a short delay"
+                .to_string(),
             supported_interfaces: vec![AgentInterface {
                 url: format!("{}/v1/rpc", base_url),
                 protocol_binding: "JSONRPC".to_string(),
@@ -208,6 +220,10 @@ impl MessageHandler for EchoHandler {
             signatures: vec![],
             icon_url: None,
         }
+    }
+
+    fn auto_complete_delay(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(2))
     }
 }
 

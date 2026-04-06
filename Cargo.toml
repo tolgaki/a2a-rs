@@ -3,7 +3,7 @@ resolver = "2"
 members = ["a2a-core", "a2a-client", "a2a-server"]
 
 [workspace.package]
-version = "1.0.15"
+version = "1.0.16"
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.75"
