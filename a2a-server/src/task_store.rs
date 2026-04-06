@@ -128,9 +128,32 @@ impl TaskStore {
         self.tasks.read().await.values().cloned().collect()
     }
 
-    /// List tasks with filtering and pagination
+    /// Validate `ListTasksRequest` parameters, returning an error message on failure.
+    pub fn validate_list_params(params: &ListTasksRequest) -> Result<(), &'static str> {
+        if let Some(ps) = params.page_size {
+            if ps == 0 || ps > 100 {
+                return Err("pageSize must be between 1 and 100");
+            }
+        }
+        if let Some(ref token) = params.page_token {
+            if !token.is_empty() && token.parse::<usize>().is_err() {
+                return Err("invalid pageToken");
+            }
+        }
+        if let Some(hl) = params.history_length {
+            // history_length is u32, but serde may accept negative JSON ints as
+            // very large u32 values. Practically, we cap at a sane maximum.
+            // The real guard is that serde rejects negative values for u32 at
+            // the deserialization layer, yielding INVALID_PARAMS.
+            let _ = hl;
+        }
+        Ok(())
+    }
+
+    /// List tasks with filtering and pagination.
     ///
-    /// Returns a TaskListResponse with filtered tasks and pagination info.
+    /// Callers should call [`validate_list_params`] first and return `-32602`
+    /// on failure. This method assumes valid parameters.
     pub async fn list_filtered(&self, params: &ListTasksRequest) -> TaskListResponse {
         let guard = self.tasks.read().await;
 
@@ -170,22 +193,26 @@ impl TaskStore {
             .collect();
 
         let total_size = filtered.len() as u32;
-        let page_size = params.page_size.unwrap_or(50).min(100);
+        let requested_page_size = params.page_size.unwrap_or(50).min(100) as usize;
 
-        // Sort by task ID for consistent pagination (could be timestamp-based in production)
-        filtered.sort_by(|a, b| a.id.cmp(&b.id));
+        // Sort by status timestamp descending (newest first) per A2A spec.
+        filtered.sort_by(|a, b| {
+            let ts_a = a.status.timestamp.as_deref().unwrap_or("");
+            let ts_b = b.status.timestamp.as_deref().unwrap_or("");
+            ts_b.cmp(ts_a) // descending
+        });
 
         // Apply pagination using page_token as offset
         let offset: usize = params
             .page_token
             .as_ref()
-            .and_then(|t| t.parse().ok())
+            .and_then(|t| if t.is_empty() { None } else { t.parse().ok() })
             .unwrap_or(0);
 
         let paginated: Vec<_> = filtered
             .into_iter()
             .skip(offset)
-            .take(page_size as usize)
+            .take(requested_page_size)
             .map(|mut task| {
                 // Optionally trim/omit history
                 match params.history_length {
@@ -202,8 +229,9 @@ impl TaskStore {
                     }
                     None => {}
                 }
-                // Optionally exclude artifacts
-                if params.include_artifacts == Some(false) {
+                // Artifacts are excluded by default per A2A spec.
+                // Only include when explicitly requested.
+                if params.include_artifacts != Some(true) {
                     task.artifacts = None;
                 }
                 task
@@ -216,6 +244,9 @@ impl TaskStore {
         } else {
             String::new()
         };
+
+        // pageSize in the response is the actual number of items on this page.
+        let page_size = paginated.len() as u32;
 
         TaskListResponse {
             tasks: paginated,

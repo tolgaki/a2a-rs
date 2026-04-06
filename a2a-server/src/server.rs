@@ -44,12 +44,15 @@ use crate::webhook_store::WebhookStore;
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub bind_address: String,
+    /// HTTP path where the JSON-RPC endpoint is exposed. Must start with `/`.
+    pub rpc_path: String,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             bind_address: "0.0.0.0:8080".to_string(),
+            rpc_path: "/v1/rpc".to_string(),
         }
     }
 }
@@ -97,6 +100,20 @@ impl A2aServer {
         self
     }
 
+    /// Configure the HTTP path where the JSON-RPC endpoint is exposed.
+    /// The path must start with `/`. Defaults to `/v1/rpc`.
+    ///
+    /// Leading slash is added automatically if missing.
+    pub fn rpc_path(mut self, path: &str) -> Self {
+        let normalized = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{}", path)
+        };
+        self.config.rpc_path = normalized;
+        self
+    }
+
     pub fn task_store(mut self, store: TaskStore) -> Self {
         self.task_store = store;
         self
@@ -126,7 +143,19 @@ impl A2aServer {
             .parse()
             .expect("Invalid bind address");
         let base_url = format!("http://{}", bind);
-        let card = Arc::new(self.handler.agent_card(&base_url));
+        let rpc_path = self.config.rpc_path.clone();
+        let full_rpc_url = format!("{}{}", base_url, rpc_path);
+
+        // Let the handler produce its card, then rewrite JSONRPC interface URLs
+        // to match the server's configured rpc_path so the agent card always
+        // advertises the right endpoint.
+        let mut card_value = self.handler.agent_card(&base_url);
+        for iface in card_value.supported_interfaces.iter_mut() {
+            if iface.protocol_binding.eq_ignore_ascii_case("jsonrpc") {
+                iface.url = full_rpc_url.clone();
+            }
+        }
+        let card = Arc::new(card_value);
 
         let state = AppState {
             handler: self.handler,
@@ -135,12 +164,13 @@ impl A2aServer {
             card,
             auth_extractor: self.auth_extractor,
             event_tx: self.event_tx,
+            rpc_path: rpc_path.clone(),
         };
 
         let timed_routes = Router::new()
             .route("/health", get(health))
             .route("/.well-known/agent-card.json", get(agent_card))
-            .route("/v1/rpc", post(handle_rpc))
+            .route(&rpc_path, post(handle_rpc))
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_timeout_error))
@@ -182,7 +212,7 @@ impl A2aServer {
 async fn handle_timeout_error(err: tower::BoxError) -> (StatusCode, Json<JsonRpcResponse>) {
     if err.is::<tower::timeout::error::Elapsed>() {
         (
-            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::OK,
             Json(error(
                 serde_json::Value::Null,
                 errors::INTERNAL_ERROR,
@@ -192,7 +222,7 @@ async fn handle_timeout_error(err: tower::BoxError) -> (StatusCode, Json<JsonRpc
         )
     } else {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::OK,
             Json(error(
                 serde_json::Value::Null,
                 errors::INTERNAL_ERROR,
@@ -237,6 +267,7 @@ pub struct AppState {
     card: Arc<AgentCard>,
     auth_extractor: Option<AuthExtractor>,
     event_tx: broadcast::Sender<StreamResponse>,
+    rpc_path: String,
 }
 
 impl AppState {
@@ -273,6 +304,11 @@ impl AppState {
     /// Get the endpoint URL from the agent card
     fn endpoint_url(&self) -> &str {
         self.card.endpoint().unwrap_or("")
+    }
+
+    /// Return the configured JSON-RPC path (e.g. `/v1/rpc`, `/spec`).
+    pub fn rpc_path(&self) -> &str {
+        &self.rpc_path
     }
 }
 
@@ -312,7 +348,7 @@ fn validate_a2a_version(
                 }
 
                 return Err((
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::OK,
                     Json(error(
                         req_id.clone(),
                         errors::VERSION_NOT_SUPPORTED,
@@ -335,7 +371,7 @@ fn validate_a2a_version(
         }
 
         return Err((
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req_id.clone(),
                 errors::VERSION_NOT_SUPPORTED,
@@ -398,12 +434,97 @@ async fn agent_card(State(state): State<AppState>) -> Json<AgentCard> {
 async fn handle_rpc(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<JsonRpcRequest>,
+    body: axum::body::Bytes,
 ) -> Response {
-    if req.jsonrpc != "2.0" {
-        let resp = error(req.id, errors::INVALID_REQUEST, "jsonrpc must be 2.0", None);
-        return (StatusCode::BAD_REQUEST, Json(resp)).into_response();
+    // Parse JSON body manually so we can return a proper JSON-RPC -32700 Parse
+    // error (HTTP 200) when the body is not valid JSON, instead of letting
+    // axum's Json extractor reject with a non-JSON-RPC 4xx response.
+    let value: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            let resp = error(
+                serde_json::Value::Null,
+                errors::PARSE_ERROR,
+                "Parse error",
+                Some(serde_json::json!({"error": e.to_string()})),
+            );
+            return (StatusCode::OK, Json(resp)).into_response();
+        }
+    };
+
+    // Recover the request id early so every error envelope references it.
+    let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
+
+    // JSON-RPC request must be a JSON object.
+    if !value.is_object() {
+        return (
+            StatusCode::OK,
+            Json(error(
+                id,
+                errors::INVALID_REQUEST,
+                "Invalid request: expected a JSON object",
+                None,
+            )),
+        )
+            .into_response();
     }
+
+    // jsonrpc must be exactly "2.0".
+    let jsonrpc = value.get("jsonrpc").and_then(|v| v.as_str()).unwrap_or("");
+    if jsonrpc != "2.0" {
+        return (
+            StatusCode::OK,
+            Json(error(
+                id,
+                errors::INVALID_REQUEST,
+                "Invalid request: jsonrpc must be \"2.0\"",
+                None,
+            )),
+        )
+            .into_response();
+    }
+
+    // method must be a non-empty string.
+    let method = match value.get("method").and_then(|v| v.as_str()) {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => {
+            return (
+                StatusCode::OK,
+                Json(error(
+                    id,
+                    errors::INVALID_REQUEST,
+                    "Invalid request: method field is required and must be a non-empty string",
+                    None,
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    // params is optional; if present it must be an object or array per JSON-RPC 2.0.
+    let params = match value.get("params") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(p) if p.is_object() || p.is_array() => Some(p.clone()),
+        Some(_) => {
+            return (
+                StatusCode::OK,
+                Json(error(
+                    id,
+                    errors::INVALID_REQUEST,
+                    "Invalid request: params must be an object or array",
+                    None,
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let req = JsonRpcRequest {
+        jsonrpc: jsonrpc.to_string(),
+        method: method.clone(),
+        params,
+        id: id.clone(),
+    };
 
     if let Err(err_response) = validate_a2a_version(&headers, &req.id) {
         return err_response.into_response();
@@ -448,11 +569,11 @@ async fn handle_rpc(
                 .into_response()
         }
         _ => (
-            StatusCode::NOT_FOUND,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::METHOD_NOT_FOUND,
-                "method not found",
+                "Method not found",
                 None,
             )),
         )
@@ -461,17 +582,16 @@ async fn handle_rpc(
 }
 
 fn handler_error_to_rpc(e: &HandlerError) -> (i32, StatusCode) {
-    match e {
-        HandlerError::InvalidInput(_) => (errors::INVALID_PARAMS, StatusCode::BAD_REQUEST),
-        HandlerError::AuthRequired(_) => (errors::INVALID_REQUEST, StatusCode::UNAUTHORIZED),
-        HandlerError::BackendUnavailable { .. } => {
-            (errors::INTERNAL_ERROR, StatusCode::SERVICE_UNAVAILABLE)
-        }
-        HandlerError::ProcessingFailed { .. } => {
-            (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR)
-        }
-        HandlerError::Internal(_) => (errors::INTERNAL_ERROR, StatusCode::INTERNAL_SERVER_ERROR),
-    }
+    // JSON-RPC 2.0 convention: always return HTTP 200 with the error envelope
+    // in the body. Tests (including the A2A TCK) expect this.
+    let code = match e {
+        HandlerError::InvalidInput(_) => errors::INVALID_PARAMS,
+        HandlerError::AuthRequired(_) => errors::INVALID_REQUEST,
+        HandlerError::BackendUnavailable { .. } => errors::INTERNAL_ERROR,
+        HandlerError::ProcessingFailed { .. } => errors::INTERNAL_ERROR,
+        HandlerError::Internal(_) => errors::INTERNAL_ERROR,
+    };
+    (code, StatusCode::OK)
 }
 
 async fn handle_message_send(
@@ -488,7 +608,7 @@ async fn handle_message_send(
         Ok(p) => p,
         Err(err) => {
             return (
-                StatusCode::BAD_REQUEST,
+                StatusCode::OK,
                 Json(error(
                     req_id,
                     errors::INVALID_PARAMS,
@@ -511,6 +631,10 @@ async fn handle_message_send(
         .unwrap_or(false);
     let history_length = params.configuration.as_ref().and_then(|c| c.history_length);
 
+    // If the incoming message references an existing task, remember the
+    // task_id so the response task can reuse it (continue-task semantics).
+    let continue_task_id = params.message.task_id.clone();
+
     match state
         .handler
         .handle_message(params.message, auth_context)
@@ -519,6 +643,15 @@ async fn handle_message_send(
         Ok(response) => {
             match response {
                 SendMessageResponse::Task(mut task) => {
+                    // Continue-task: when the message referenced an existing
+                    // task, override the handler's task id so the same task
+                    // is updated instead of creating a new one.
+                    if let Some(ref tid) = continue_task_id {
+                        if state.task_store.get_flexible(tid).await.is_some() {
+                            task.id = tid.clone();
+                        }
+                    }
+
                     // Store the task and broadcast event
                     state.task_store.insert(task.clone()).await;
                     state.broadcast_event(StreamResponse::Task(task.clone()));
@@ -585,7 +718,7 @@ async fn handle_message_send(
                     match serde_json::to_value(SendMessageResult::Task(task.clone())) {
                         Ok(val) => (StatusCode::OK, Json(success(req_id, val))),
                         Err(e) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
+                            StatusCode::OK,
                             Json(error(
                                 req_id,
                                 errors::INTERNAL_ERROR,
@@ -600,7 +733,7 @@ async fn handle_message_send(
                     match serde_json::to_value(SendMessageResult::Message(msg)) {
                         Ok(val) => (StatusCode::OK, Json(success(req_id, val))),
                         Err(e) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
+                            StatusCode::OK,
                             Json(error(
                                 req_id,
                                 errors::INTERNAL_ERROR,
@@ -633,7 +766,7 @@ async fn handle_message_stream(
 
     if !state.streaming_enabled() {
         return (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req_id,
                 errors::UNSUPPORTED_OPERATION,
@@ -651,7 +784,7 @@ async fn handle_message_stream(
         Ok(p) => p,
         Err(err) => {
             return (
-                StatusCode::BAD_REQUEST,
+                StatusCode::OK,
                 Json(error(
                     req_id,
                     errors::INVALID_PARAMS,
@@ -662,6 +795,8 @@ async fn handle_message_stream(
                 .into_response();
         }
     };
+
+    let continue_task_id = params.message.task_id.clone();
 
     let response = match state
         .handler
@@ -676,11 +811,11 @@ async fn handle_message_stream(
     };
 
     // Extract task from response (streaming only works with tasks)
-    let task = match response {
+    let mut task = match response {
         SendMessageResponse::Task(t) => t,
         SendMessageResponse::Message(_) => {
             return (
-                StatusCode::BAD_REQUEST,
+                StatusCode::OK,
                 Json(error(
                     req_id,
                     errors::UNSUPPORTED_OPERATION,
@@ -691,6 +826,13 @@ async fn handle_message_stream(
                 .into_response();
         }
     };
+
+    // Continue-task: reuse the referenced task id if it exists.
+    if let Some(ref tid) = continue_task_id {
+        if state.task_store.get_flexible(tid).await.is_some() {
+            task.id = tid.clone();
+        }
+    }
 
     let task_id = task.id.clone();
     state.task_store.insert(task.clone()).await;
@@ -756,7 +898,9 @@ async fn handle_message_stream(
         }
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn handle_tasks_get(
@@ -773,7 +917,7 @@ async fn handle_tasks_get(
                 match serde_json::to_value(task) {
                     Ok(val) => (StatusCode::OK, Json(success(req.id, val))),
                     Err(e) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
+                        StatusCode::OK,
                         Json(error(
                             req.id,
                             errors::INTERNAL_ERROR,
@@ -784,7 +928,7 @@ async fn handle_tasks_get(
                 }
             }
             None => (
-                StatusCode::NOT_FOUND,
+                StatusCode::OK,
                 Json(error(
                     req.id,
                     errors::TASK_NOT_FOUND,
@@ -794,7 +938,7 @@ async fn handle_tasks_get(
             ),
         },
         Err(err) => (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::INVALID_PARAMS,
@@ -844,7 +988,7 @@ async fn handle_tasks_cancel(
                     match serde_json::to_value(task) {
                         Ok(val) => (StatusCode::OK, Json(success(req.id, val))),
                         Err(e) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
+                            StatusCode::OK,
                             Json(error(
                                 req.id,
                                 errors::INTERNAL_ERROR,
@@ -855,11 +999,11 @@ async fn handle_tasks_cancel(
                     }
                 }
                 Some(Err(error_code)) => (
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::OK,
                     Json(error(req.id, error_code, "task not cancelable", None)),
                 ),
                 None => (
-                    StatusCode::NOT_FOUND,
+                    StatusCode::OK,
                     Json(error(
                         req.id,
                         errors::TASK_NOT_FOUND,
@@ -870,7 +1014,7 @@ async fn handle_tasks_cancel(
             }
         }
         Err(err) => (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::INVALID_PARAMS,
@@ -890,11 +1034,19 @@ async fn handle_tasks_list(
 
     match params {
         Ok(p) => {
+            // Validate pagination / filter constraints before querying.
+            if let Err(msg) = TaskStore::validate_list_params(&p) {
+                return (
+                    StatusCode::OK,
+                    Json(error(req.id, errors::INVALID_PARAMS, msg, None)),
+                );
+            }
+
             let response = state.task_store.list_filtered(&p).await;
             match serde_json::to_value(response) {
                 Ok(val) => (StatusCode::OK, Json(success(req.id, val))),
                 Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    StatusCode::OK,
                     Json(error(
                         req.id,
                         errors::INTERNAL_ERROR,
@@ -905,7 +1057,7 @@ async fn handle_tasks_list(
             }
         }
         Err(err) => (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::INVALID_PARAMS,
@@ -930,7 +1082,7 @@ async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Respo
         Ok(p) => p,
         Err(err) => {
             return (
-                StatusCode::BAD_REQUEST,
+                StatusCode::OK,
                 Json(error(
                     req_id,
                     errors::INVALID_PARAMS,
@@ -947,8 +1099,13 @@ async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Respo
         Some(t) => t,
         None => {
             return (
-                StatusCode::NOT_FOUND,
-                Json(error(req_id, errors::TASK_NOT_FOUND, "task not found", None)),
+                StatusCode::OK,
+                Json(error(
+                    req_id,
+                    errors::TASK_NOT_FOUND,
+                    "task not found",
+                    None,
+                )),
             )
                 .into_response();
         }
@@ -1016,7 +1173,9 @@ async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Respo
         }
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn handle_get_extended_agent_card(
@@ -1026,7 +1185,7 @@ async fn handle_get_extended_agent_card(
 ) -> (StatusCode, Json<JsonRpcResponse>) {
     let Some(auth) = auth_context else {
         return (
-            StatusCode::UNAUTHORIZED,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::INVALID_REQUEST,
@@ -1036,13 +1195,14 @@ async fn handle_get_extended_agent_card(
         );
     };
 
-    let base_url = state.endpoint_url().trim_end_matches("/v1/rpc");
+    let rpc_path = state.rpc_path().to_string();
+    let base_url = state.endpoint_url().trim_end_matches(rpc_path.as_str());
 
     match state.handler.extended_agent_card(base_url, &auth).await {
         Some(card) => match serde_json::to_value(card) {
             Ok(val) => (StatusCode::OK, Json(success(req.id, val))),
             Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::OK,
                 Json(error(
                     req.id,
                     errors::INTERNAL_ERROR,
@@ -1052,7 +1212,7 @@ async fn handle_get_extended_agent_card(
             ),
         },
         None => (
-            StatusCode::NOT_FOUND,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::EXTENDED_AGENT_CARD_NOT_CONFIGURED,
@@ -1071,7 +1231,7 @@ async fn handle_push_config_create(
 ) -> (StatusCode, Json<JsonRpcResponse>) {
     if !state.push_notifications_enabled() {
         return (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::PUSH_NOTIFICATION_NOT_SUPPORTED,
@@ -1088,7 +1248,7 @@ async fn handle_push_config_create(
         Ok(p) => {
             if state.task_store.get_flexible(&p.task_id).await.is_none() {
                 return (
-                    StatusCode::NOT_FOUND,
+                    StatusCode::OK,
                     Json(error(
                         req.id,
                         errors::TASK_NOT_FOUND,
@@ -1104,7 +1264,7 @@ async fn handle_push_config_create(
                 .await
             {
                 return (
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::OK,
                     Json(error(req.id, errors::INVALID_PARAMS, &e.to_string(), None)),
                 );
             }
@@ -1121,7 +1281,7 @@ async fn handle_push_config_create(
             )
         }
         Err(err) => (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::INVALID_PARAMS,
@@ -1138,7 +1298,7 @@ async fn handle_push_config_get(
 ) -> (StatusCode, Json<JsonRpcResponse>) {
     if !state.push_notifications_enabled() {
         return (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::PUSH_NOTIFICATION_NOT_SUPPORTED,
@@ -1164,7 +1324,7 @@ async fn handle_push_config_get(
                 )),
             ),
             None => (
-                StatusCode::NOT_FOUND,
+                StatusCode::OK,
                 Json(error(
                     req.id,
                     errors::TASK_NOT_FOUND,
@@ -1174,7 +1334,7 @@ async fn handle_push_config_get(
             ),
         },
         Err(err) => (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::INVALID_PARAMS,
@@ -1191,7 +1351,7 @@ async fn handle_push_config_list(
 ) -> (StatusCode, Json<JsonRpcResponse>) {
     if !state.push_notifications_enabled() {
         return (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::PUSH_NOTIFICATION_NOT_SUPPORTED,
@@ -1230,7 +1390,7 @@ async fn handle_push_config_list(
             )
         }
         Err(err) => (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::INVALID_PARAMS,
@@ -1247,7 +1407,7 @@ async fn handle_push_config_delete(
 ) -> (StatusCode, Json<JsonRpcResponse>) {
     if !state.push_notifications_enabled() {
         return (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::PUSH_NOTIFICATION_NOT_SUPPORTED,
@@ -1266,7 +1426,7 @@ async fn handle_push_config_delete(
                 (StatusCode::OK, Json(success(req.id, serde_json::json!({}))))
             } else {
                 (
-                    StatusCode::NOT_FOUND,
+                    StatusCode::OK,
                     Json(error(
                         req.id,
                         errors::TASK_NOT_FOUND,
@@ -1277,7 +1437,7 @@ async fn handle_push_config_delete(
             }
         }
         Err(err) => (
-            StatusCode::BAD_REQUEST,
+            StatusCode::OK,
             Json(error(
                 req.id,
                 errors::INVALID_PARAMS,

@@ -70,7 +70,11 @@ pub struct AgentCard {
     #[serde(default, deserialize_with = "nullable_vec")]
     pub skills: Vec<AgentSkill>,
     /// Cryptographic signatures for verification
-    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "nullable_vec")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "nullable_vec"
+    )]
     pub signatures: Vec<AgentCardSignature>,
     /// Icon URL for the agent
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -274,7 +278,11 @@ pub struct AgentCapabilities {
     pub push_notifications: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extended_agent_card: Option<bool>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "nullable_vec")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "nullable_vec"
+    )]
     pub extensions: Vec<AgentExtension>,
 }
 
@@ -404,8 +412,8 @@ impl<'de> Deserialize<'de> for Part {
                 metadata,
             })
         } else if let Some(file) = obj.get("file") {
-            let file: FileContent = serde_json::from_value(file.clone())
-                .map_err(serde::de::Error::custom)?;
+            let file: FileContent =
+                serde_json::from_value(file.clone()).map_err(serde::de::Error::custom)?;
             Ok(Part::File { file, metadata })
         } else if let Some(data) = obj.get("data") {
             Ok(Part::Data {
@@ -415,9 +423,18 @@ impl<'de> Deserialize<'de> for Part {
         } else if obj.contains_key("raw") || obj.contains_key("url") {
             // Proto-style: raw/url as top-level fields (not nested under file)
             let file = FileContent {
-                bytes: obj.get("raw").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                uri: obj.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                name: obj.get("filename").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                bytes: obj
+                    .get("raw")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                uri: obj
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                name: obj
+                    .get("filename")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 mime_type: obj
                     .get("mediaType")
                     .or_else(|| obj.get("mimeType"))
@@ -438,10 +455,9 @@ impl<'de> Deserialize<'de> for Part {
                     metadata,
                 }),
                 "file" => {
-                    let file: FileContent = serde_json::from_value(
-                        obj.get("file").cloned().unwrap_or_default(),
-                    )
-                    .map_err(serde::de::Error::custom)?;
+                    let file: FileContent =
+                        serde_json::from_value(obj.get("file").cloned().unwrap_or_default())
+                            .map_err(serde::de::Error::custom)?;
                     Ok(Part::File { file, metadata })
                 }
                 "data" => Ok(Part::Data {
@@ -568,7 +584,11 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     /// Extension URIs
-    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "nullable_vec")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "nullable_vec"
+    )]
     pub extensions: Vec<String>,
     /// Optional related task IDs
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -609,7 +629,11 @@ pub struct Artifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     /// Extension URIs
-    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "nullable_vec")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "nullable_vec"
+    )]
     pub extensions: Vec<String>,
 }
 
@@ -1325,8 +1349,7 @@ mod tests {
         }
 
         // v0.3 kind-discriminated format (backward compat)
-        let text_v03: Part =
-            serde_json::from_str(r#"{"kind":"text","text":"hello v03"}"#).unwrap();
+        let text_v03: Part = serde_json::from_str(r#"{"kind":"text","text":"hello v03"}"#).unwrap();
         assert_eq!(text_v03.as_text(), Some("hello v03"));
     }
 

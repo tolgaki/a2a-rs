@@ -16,6 +16,13 @@
 //!     .run()
 //!     .await?;
 //!
+//! // Customize the JSON-RPC endpoint path (defaults to /v1/rpc)
+//! A2aServer::echo()
+//!     .bind("0.0.0.0:5000")
+//!     .rpc_path("/spec")
+//!     .run()
+//!     .await?;
+//!
 //! // Or implement your own handler
 //! struct MyAgent { /* ... */ }
 //!

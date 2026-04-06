@@ -9,8 +9,8 @@ use std::pin::Pin;
 
 use a2a_rs_core::{
     compat, AgentCard, CancelTaskRequest, CreateTaskPushNotificationConfigRequest,
-    DeleteTaskPushNotificationConfigRequest, GetTaskPushNotificationConfigRequest,
-    GetTaskRequest, JsonRpcRequest, JsonRpcResponse, ListTaskPushNotificationConfigRequest,
+    DeleteTaskPushNotificationConfigRequest, GetTaskPushNotificationConfigRequest, GetTaskRequest,
+    JsonRpcRequest, JsonRpcResponse, ListTaskPushNotificationConfigRequest,
     ListTaskPushNotificationConfigResponse, ListTasksRequest, Message, PushNotificationConfig,
     SendMessageConfiguration, SendMessageRequest, SendMessageResult, StreamingMessageResult,
     SubscribeToTaskRequest, Task, TaskListResponse, TaskPushNotificationConfig,
@@ -408,7 +408,12 @@ impl A2aClient {
         };
         if self.config.transport == Transport::Rest {
             return self
-                .rest_call(reqwest::Method::POST, "/message:send", Some(params), session_token)
+                .rest_call(
+                    reqwest::Method::POST,
+                    "/message:send",
+                    Some(params),
+                    session_token,
+                )
                 .await;
         }
         self.json_rpc_call("message/send", params, session_token)
@@ -586,9 +591,7 @@ impl A2aClient {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamingMessageResult>> + Send>>> {
         if self.config.transport == Transport::Rest {
             let path = format!("/tasks/{}/subscribe", urlencoding::encode(task_id));
-            return self
-                .rest_sse_call::<()>(&path, None, session_token)
-                .await;
+            return self.rest_sse_call::<()>(&path, None, session_token).await;
         }
 
         let rpc_url = self.get_cached_endpoint().await?;
@@ -702,7 +705,9 @@ impl A2aClient {
         let rpc_url = self.get_cached_endpoint().await?;
         let request = JsonRpcRequest {
             jsonrpc: "2.0".into(),
-            method: self.wire_method("tasks/pushNotificationConfig/delete").into(),
+            method: self
+                .wire_method("tasks/pushNotificationConfig/delete")
+                .into(),
             params: Some(serde_json::to_value(params)?),
             id: serde_json::json!(1),
         };

@@ -177,8 +177,11 @@ async fn test_invalid_method() {
 
     let request = rpc_request("invalid/method", json!({}));
     let response = router.oneshot(request).await.unwrap();
-    // Server returns 404 for unknown methods (method routing at HTTP level)
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // Per JSON-RPC 2.0: HTTP 200 with a -32601 error envelope.
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc_response = response_json(response).await;
+    let error = rpc_response.error.expect("should have error");
+    assert_eq!(error.code, -32601); // METHOD_NOT_FOUND
 }
 
 #[tokio::test]
@@ -196,8 +199,106 @@ async fn test_invalid_json() {
         .unwrap();
 
     let response = router.oneshot(request).await.unwrap();
-    // Parse error should return 400
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Per JSON-RPC 2.0: parse error is HTTP 200 with a -32700 error envelope.
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc_response = response_json(response).await;
+    let error = rpc_response.error.expect("should have error");
+    assert_eq!(error.code, -32700); // PARSE_ERROR
+    assert!(rpc_response.id.is_null());
+}
+
+#[tokio::test]
+async fn test_invalid_jsonrpc_version() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    let body = json!({
+        "jsonrpc": "1.0",
+        "method": "message/send",
+        "params": {},
+        "id": 7
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc_response = response_json(response).await;
+    let error = rpc_response.error.expect("should have error");
+    assert_eq!(error.code, -32600); // INVALID_REQUEST
+}
+
+#[tokio::test]
+async fn test_missing_method_field() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    let body = json!({ "jsonrpc": "2.0", "id": 3 });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc_response = response_json(response).await;
+    let error = rpc_response.error.expect("should have error");
+    assert_eq!(error.code, -32600); // INVALID_REQUEST
+}
+
+#[tokio::test]
+async fn test_custom_rpc_path() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address")
+        .rpc_path("/spec");
+    let router = server.build_router();
+
+    // The original /v1/rpc path should no longer respond.
+    let request = rpc_request(
+        "message/send",
+        json!({ "message": test_message("m", "hi") }),
+    );
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // The configured /spec path should respond.
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "message/send",
+        "params": { "message": test_message("m", "hi") },
+        "id": 1,
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/spec")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The agent card should advertise the custom path.
+    let request = Request::builder()
+        .method("GET")
+        .uri("/.well-known/agent-card.json")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let card: a2a_rs_core::AgentCard = serde_json::from_slice(&bytes).unwrap();
+    assert!(card.endpoint().unwrap().ends_with("/spec"));
 }
 
 #[tokio::test]
@@ -260,9 +361,110 @@ async fn test_echo_response_content() {
     let agent_msg = &history[1];
     assert_eq!(agent_msg.role, Role::Agent);
 
-    let text = agent_msg.parts[0]
-        .as_text()
-        .expect("Expected text part");
+    let text = agent_msg.parts[0].as_text().expect("Expected text part");
     assert!(text.contains("echo:"));
     assert!(text.contains("Hello World"));
+}
+
+#[tokio::test]
+async fn test_list_tasks_page_size_validation() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    // pageSize=0 → -32602
+    let request = rpc_request("tasks/list", json!({ "pageSize": 0 }));
+    let rpc = response_json(router.clone().oneshot(request).await.unwrap()).await;
+    assert_eq!(rpc.error.unwrap().code, -32602);
+
+    // pageSize=101 → -32602
+    let request = rpc_request("tasks/list", json!({ "pageSize": 101 }));
+    let rpc = response_json(router.clone().oneshot(request).await.unwrap()).await;
+    assert_eq!(rpc.error.unwrap().code, -32602);
+
+    // invalid pageToken → -32602
+    let request = rpc_request("tasks/list", json!({ "pageToken": "not-a-number" }));
+    let rpc = response_json(router.clone().oneshot(request).await.unwrap()).await;
+    assert_eq!(rpc.error.unwrap().code, -32602);
+}
+
+#[tokio::test]
+async fn test_list_tasks_page_size_response() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    // Create 3 tasks
+    for i in 0..3 {
+        let msg = test_message(&format!("ps-{i}"), &format!("msg {i}"));
+        let req = rpc_request("message/send", json!({ "message": msg }));
+        router.clone().oneshot(req).await.unwrap();
+    }
+
+    // Request with pageSize=10 (larger than total)
+    let request = rpc_request("tasks/list", json!({ "pageSize": 10 }));
+    let rpc = response_json(router.oneshot(request).await.unwrap()).await;
+    let result = rpc.result.unwrap();
+    // pageSize in response should be actual count (3), not requested (10)
+    assert_eq!(result["pageSize"].as_u64().unwrap(), 3);
+    assert_eq!(result["totalSize"].as_u64().unwrap(), 3);
+    // Last page → empty nextPageToken
+    assert_eq!(result["nextPageToken"].as_str().unwrap(), "");
+}
+
+#[tokio::test]
+async fn test_list_tasks_artifacts_excluded_by_default() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    let msg = test_message("art-1", "hello");
+    let req = rpc_request("message/send", json!({ "message": msg }));
+    router.clone().oneshot(req).await.unwrap();
+
+    // List without includeArtifacts — artifacts should be absent
+    let request = rpc_request("tasks/list", json!({}));
+    let rpc = response_json(router.oneshot(request).await.unwrap()).await;
+    let tasks = rpc.result.unwrap()["tasks"].as_array().unwrap().clone();
+    for task in &tasks {
+        assert!(
+            task.get("artifacts").is_none() || task["artifacts"].is_null(),
+            "artifacts should be excluded by default"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_continue_task() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    // Create initial task
+    let msg = test_message("cont-1", "first");
+    let req = rpc_request("message/send", json!({ "message": msg }));
+    let rpc = response_json(router.clone().oneshot(req).await.unwrap()).await;
+    let task = extract_task(rpc.result.unwrap());
+    let task_id = task.id.clone();
+
+    // Send a follow-up referencing the same task
+    let follow_up = json!({
+        "message": {
+            "kind": "message",
+            "messageId": "cont-2",
+            "role": "user",
+            "parts": [{"kind": "text", "text": "follow up"}],
+            "taskId": task_id,
+        }
+    });
+    let req = rpc_request("message/send", follow_up);
+    let rpc = response_json(router.oneshot(req).await.unwrap()).await;
+    let task2 = extract_task(rpc.result.unwrap());
+
+    // The response task should reuse the original task id
+    assert_eq!(task2.id, task_id);
 }
