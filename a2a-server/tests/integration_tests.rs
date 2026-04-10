@@ -265,13 +265,14 @@ async fn test_custom_rpc_path() {
         .rpc_path("/spec");
     let router = server.build_router();
 
-    // The original /v1/rpc path should no longer respond.
+    // The original /v1/rpc path is also handled via the POST fallback
+    // (all POST paths are routed through JSON-RPC for TCK compliance).
     let request = rpc_request(
         "message/send",
         json!({ "message": test_message("m", "hi") }),
     );
     let response = router.clone().oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::OK);
 
     // The configured /spec path should respond.
     let body = json!({
@@ -409,7 +410,7 @@ async fn test_list_tasks_page_size_response() {
     let request = rpc_request("tasks/list", json!({ "pageSize": 10 }));
     let rpc = response_json(router.oneshot(request).await.unwrap()).await;
     let result = rpc.result.unwrap();
-    // pageSize in response should be actual count (3), not requested (10)
+    // pageSize in response is the actual number of items returned
     assert_eq!(result["pageSize"].as_u64().unwrap(), 3);
     assert_eq!(result["totalSize"].as_u64().unwrap(), 3);
     // Last page → empty nextPageToken
@@ -469,4 +470,370 @@ async fn test_continue_task() {
 
     // The response task should reuse the original task id
     assert_eq!(task2.id, task_id);
+}
+
+// ============ TCK Compliance Tests ============
+
+/// TCK: test_rejects_malformed_json — malformed JSON must return -32700
+#[tokio::test]
+async fn test_tck_malformed_json() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"jsonrpc": "2.0", "method": "SendMessage"#)) // truncated
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc = response_json(response).await;
+    let err = rpc.error.expect("should have error");
+    assert_eq!(err.code, -32700); // PARSE_ERROR
+}
+
+/// TCK: test_raw_invalid_json — totally invalid bytes
+#[tokio::test]
+async fn test_tck_raw_invalid_json() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from("not json at all!!!"))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc = response_json(response).await;
+    let err = rpc.error.expect("should have error");
+    assert_eq!(err.code, -32700);
+}
+
+/// TCK: POST to any path should be handled by JSON-RPC (fallback)
+#[tokio::test]
+async fn test_tck_post_fallback_any_path() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    // POST to /spec (not the configured rpc_path) should still work
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "SendMessage",
+        "params": { "message": test_message("fb-1", "hello") },
+        "id": 42
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/spec")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc = response_json(response).await;
+    assert!(rpc.error.is_none(), "should succeed via fallback");
+    assert!(rpc.result.is_some());
+}
+
+/// TCK: malformed JSON to non-standard path must still return -32700
+#[tokio::test]
+async fn test_tck_malformed_json_on_fallback_path() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/some/random/path")
+        .header("content-type", "application/json")
+        .body(Body::from("{bad json"))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc = response_json(response).await;
+    assert_eq!(rpc.error.unwrap().code, -32700);
+}
+
+/// TCK: GET /.well-known/agent.json should return agent card (v0.2 fallback)
+#[tokio::test]
+async fn test_tck_agent_json_alias() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/.well-known/agent.json")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let card: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(card.get("name").is_some());
+    assert!(card.get("description").is_some());
+    assert!(card.get("version").is_some());
+    assert!(card.get("capabilities").is_some());
+    assert!(card.get("defaultInputModes").is_some());
+    assert!(card.get("defaultOutputModes").is_some());
+    assert!(card.get("skills").is_some());
+}
+
+/// TCK: POST to /.well-known/agent-card.json should not return 405
+#[tokio::test]
+async fn test_tck_post_to_agent_card_path() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "GetTask",
+        "params": { "id": "nonexistent" },
+        "id": 1
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/.well-known/agent-card.json")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    // Should get 200 with JSON-RPC error, NOT 405
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc = response_json(response).await;
+    assert_eq!(rpc.error.unwrap().code, -32001); // TASK_NOT_FOUND
+}
+
+/// TCK: ListTasks with no params should use default page size (50)
+#[tokio::test]
+async fn test_tck_list_tasks_default_page_size() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    // ListTasks with empty params
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "ListTasks",
+        "params": {},
+        "id": 1
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc = response_json(response).await;
+    let result = rpc.result.unwrap();
+    // pageSize == 0 when no items returned (actual count, not requested)
+    assert_eq!(result["pageSize"].as_u64().unwrap(), 0);
+    assert_eq!(result["totalSize"].as_u64().unwrap(), 0);
+    assert_eq!(result["tasks"].as_array().unwrap().len(), 0);
+    assert_eq!(result["nextPageToken"].as_str().unwrap(), "");
+}
+
+/// TCK: ListTasks with NO params field at all should work (params absent)
+#[tokio::test]
+async fn test_tck_list_tasks_absent_params() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    // JSON-RPC request without params field
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "ListTasks",
+        "id": 1
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc = response_json(response).await;
+    assert!(rpc.error.is_none(), "ListTasks with absent params should succeed");
+    let result = rpc.result.unwrap();
+    assert_eq!(result["pageSize"].as_u64().unwrap(), 0); // 0 items returned
+}
+
+/// TCK: PascalCase method names must work
+#[tokio::test]
+async fn test_tck_pascal_case_methods() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    // SendMessage (PascalCase)
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "SendMessage",
+        "params": { "message": test_message("pc-1", "hello") },
+        "id": 1
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc = response_json(response).await;
+    assert!(rpc.error.is_none());
+    let task = extract_task(rpc.result.unwrap());
+
+    // GetTask (PascalCase)
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "GetTask",
+        "params": { "id": task.id },
+        "id": 2
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    let rpc = response_json(response).await;
+    assert!(rpc.error.is_none());
+    // GetTask returns task directly (no wrapper)
+    let result = rpc.result.unwrap();
+    assert_eq!(result["id"].as_str().unwrap(), task.id);
+
+    // CancelTask (PascalCase)
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "CancelTask",
+        "params": { "id": task.id },
+        "id": 3
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    let rpc = response_json(response).await;
+    assert!(rpc.error.is_none());
+    let result = rpc.result.unwrap();
+    assert_eq!(result["status"]["state"].as_str().unwrap(), "TASK_STATE_CANCELED");
+}
+
+/// TCK: Agent card must advertise 127.0.0.1 when bound to 0.0.0.0
+#[tokio::test]
+async fn test_tck_agent_card_reachable_url() {
+    let server = A2aServer::echo()
+        .bind("0.0.0.0:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/.well-known/agent-card.json")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let card: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let iface = card["supportedInterfaces"]
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap();
+    let url = iface["url"].as_str().unwrap();
+    // Should use localhost, not 0.0.0.0 or raw IP
+    assert!(
+        url.contains("localhost"),
+        "agent card should advertise localhost not raw IP, got: {url}"
+    );
+}
+
+/// TCK: Push notification methods on agent without push support → -32003
+#[tokio::test]
+async fn test_tck_push_notification_not_supported() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "CreateTaskPushNotificationConfig",
+        "params": {
+            "taskId": "some-task",
+            "configId": "cfg-1",
+            "pushNotificationConfig": { "url": "https://example.com/hook" }
+        },
+        "id": 1
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let rpc = response_json(response).await;
+    assert_eq!(rpc.error.unwrap().code, -32003);
+}
+
+/// TCK: EchoHandler generates contextId when message doesn't provide one
+#[tokio::test]
+async fn test_tck_generated_context_id() {
+    let server = A2aServer::echo()
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    let msg = test_message("ctx-1", "hello");
+    let req = rpc_request("SendMessage", json!({ "message": msg }));
+    let rpc = response_json(router.clone().oneshot(req).await.unwrap()).await;
+    let task = extract_task(rpc.result.unwrap());
+    assert!(!task.context_id.is_empty(), "should have a generated contextId");
+
+    // Second task should get a different contextId
+    let msg2 = test_message("ctx-2", "world");
+    let req2 = rpc_request("SendMessage", json!({ "message": msg2 }));
+    let rpc2 = response_json(router.oneshot(req2).await.unwrap()).await;
+    let task2 = extract_task(rpc2.result.unwrap());
+    assert_ne!(task.context_id, task2.context_id, "each task should get unique contextId");
 }

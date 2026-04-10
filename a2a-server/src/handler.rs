@@ -152,7 +152,10 @@ impl MessageHandler for EchoHandler {
             .join("\n");
 
         let task_id = Uuid::new_v4().to_string();
-        let context_id = message.context_id.clone().unwrap_or_default();
+        let context_id = message
+            .context_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
 
         let response = Message {
             kind: "message".to_string(),
@@ -202,7 +205,12 @@ impl MessageHandler for EchoHandler {
             }),
             version: PROTOCOL_VERSION.to_string(),
             documentation_url: None,
-            capabilities: AgentCapabilities::default(),
+            capabilities: AgentCapabilities {
+                streaming: Some(false),
+                push_notifications: Some(false),
+                extended_agent_card: Some(false),
+                ..Default::default()
+            },
             security_schemes: Default::default(),
             security_requirements: vec![],
             default_input_modes: vec!["text/plain".to_string()],

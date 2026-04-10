@@ -404,7 +404,6 @@ impl Serialize for Part {
         match self {
             Part::Text { text, metadata } => {
                 let mut map = serializer.serialize_map(None)?;
-                map.serialize_entry("kind", "text")?;
                 map.serialize_entry("text", text)?;
                 if let Some(m) = metadata {
                     map.serialize_entry("metadata", m)?;
@@ -412,9 +411,21 @@ impl Serialize for Part {
                 map.end()
             }
             Part::File { file, metadata } => {
+                // v1.0 flat format: fields are top-level in the Part, not nested
+                // under "file". Field names: url, raw, filename, mediaType.
                 let mut map = serializer.serialize_map(None)?;
-                map.serialize_entry("kind", "file")?;
-                map.serialize_entry("file", file)?;
+                if let Some(ref uri) = file.uri {
+                    map.serialize_entry("url", uri)?;
+                }
+                if let Some(ref bytes) = file.bytes {
+                    map.serialize_entry("raw", bytes)?;
+                }
+                if let Some(ref name) = file.name {
+                    map.serialize_entry("filename", name)?;
+                }
+                if let Some(ref mime) = file.mime_type {
+                    map.serialize_entry("mediaType", mime)?;
+                }
                 if let Some(m) = metadata {
                     map.serialize_entry("metadata", m)?;
                 }
@@ -422,7 +433,6 @@ impl Serialize for Part {
             }
             Part::Data { data, metadata } => {
                 let mut map = serializer.serialize_map(None)?;
-                map.serialize_entry("kind", "data")?;
                 map.serialize_entry("data", data)?;
                 if let Some(m) = metadata {
                     map.serialize_entry("metadata", m)?;
@@ -603,8 +613,9 @@ pub enum Role {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
-    /// Kind discriminator — always "message"
-    #[serde(default = "default_message_kind")]
+    /// Kind discriminator — always "message".
+    /// Excluded from v1.0 wire format; retained for backward compat deserialization.
+    #[serde(default = "default_message_kind", skip_serializing)]
     pub kind: String,
     /// Unique message identifier
     pub message_id: String,
@@ -718,8 +729,9 @@ pub struct TaskStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
-    /// Kind discriminator — always "task"
-    #[serde(default = "default_task_kind")]
+    /// Kind discriminator — always "task".
+    /// Excluded from v1.0 wire format; retained for backward compat deserialization.
+    #[serde(default = "default_task_kind", skip_serializing)]
     pub kind: String,
     /// Unique task identifier (UUID)
     pub id: String,
@@ -817,9 +829,9 @@ pub mod errors {
     pub const UNSUPPORTED_OPERATION: i32 = -32004;
     pub const CONTENT_TYPE_NOT_SUPPORTED: i32 = -32005;
     pub const EXTENDED_AGENT_CARD_NOT_CONFIGURED: i32 = -32006;
-    pub const VERSION_NOT_SUPPORTED: i32 = -32007;
+    pub const VERSION_NOT_SUPPORTED: i32 = -32009;
     pub const INVALID_AGENT_RESPONSE: i32 = -32008;
-    pub const EXTENSION_SUPPORT_REQUIRED: i32 = -32009;
+    pub const EXTENSION_SUPPORT_REQUIRED: i32 = -32010;
 
     pub fn message_for_code(code: i32) -> &'static str {
         match code {
@@ -1135,8 +1147,8 @@ pub enum StreamResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskStatusUpdateEvent {
-    /// Kind discriminator — always "status-update"
-    #[serde(default = "default_status_update_kind")]
+    /// Kind discriminator — always "status-update".
+    #[serde(default = "default_status_update_kind", skip_serializing)]
     pub kind: String,
     /// Task identifier
     pub task_id: String,
@@ -1157,7 +1169,7 @@ pub struct TaskStatusUpdateEvent {
 #[serde(rename_all = "camelCase")]
 pub struct TaskArtifactUpdateEvent {
     /// Kind discriminator — always "artifact-update"
-    #[serde(default = "default_artifact_update_kind")]
+    #[serde(default = "default_artifact_update_kind", skip_serializing)]
     pub kind: String,
     /// Task identifier
     pub task_id: String,
@@ -1222,7 +1234,7 @@ pub fn completed_task_with_text(user_message: Message, reply_text: &str) -> Task
         status: TaskStatus {
             state: TaskState::Completed,
             message: Some(agent_msg.clone()),
-            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+            timestamp: Some(now_iso8601()),
         },
         history: Some(vec![user_message, agent_msg]),
         artifacts: None,
@@ -1230,9 +1242,12 @@ pub fn completed_task_with_text(user_message: Message, reply_text: &str) -> Task
     }
 }
 
-/// Generate ISO 8601 timestamp
+/// Generate ISO 8601 timestamp with Z suffix (UTC).
+///
+/// The A2A spec requires timestamps to use the `Z` suffix rather than
+/// `+00:00`.
 pub fn now_iso8601() -> String {
-    chrono::Utc::now().to_rfc3339()
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.fZ").to_string()
 }
 
 /// Validate task ID format (UUID)
@@ -1324,7 +1339,8 @@ mod tests {
         let part = Part::text("hello");
         let json = serde_json::to_string(&part).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value.get("kind").unwrap().as_str().unwrap(), "text");
+        // v1.0 wire format omits kind
+        assert!(value.get("kind").is_none());
         assert_eq!(value.get("text").unwrap().as_str().unwrap(), "hello");
     }
 
@@ -1342,14 +1358,14 @@ mod tests {
         let part = Part::file_uri("https://example.com/file.pdf", "application/pdf");
         let json = serde_json::to_string(&part).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value.get("kind").unwrap().as_str().unwrap(), "file");
-        let file = value.get("file").unwrap();
+        // v1.0 flat format: url and mediaType at top level, no nested "file"
+        assert!(value.get("file").is_none());
         assert_eq!(
-            file.get("uri").unwrap().as_str().unwrap(),
+            value.get("url").unwrap().as_str().unwrap(),
             "https://example.com/file.pdf"
         );
         assert_eq!(
-            file.get("mimeType").unwrap().as_str().unwrap(),
+            value.get("mediaType").unwrap().as_str().unwrap(),
             "application/pdf"
         );
     }
@@ -1359,7 +1375,7 @@ mod tests {
         let part = Part::data(serde_json::json!({"key": "value"}));
         let json = serde_json::to_string(&part).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value.get("kind").unwrap().as_str().unwrap(), "data");
+        assert!(value.get("kind").is_none());
         assert_eq!(
             value.get("data").unwrap(),
             &serde_json::json!({"key": "value"})

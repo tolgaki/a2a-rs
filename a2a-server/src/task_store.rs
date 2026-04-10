@@ -245,7 +245,8 @@ impl TaskStore {
             String::new()
         };
 
-        // pageSize in the response is the actual number of items on this page.
+        // pageSize in the response is the number of items actually returned
+        // on this page (per A2A TCK expectations).
         let page_size = paginated.len() as u32;
 
         TaskListResponse {
