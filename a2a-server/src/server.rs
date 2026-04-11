@@ -799,8 +799,18 @@ async fn handle_message_send(
                         }
                     }
 
-                    // Store the task and broadcast event
+                    // Store the task, then subscribe to events BEFORE
+                    // broadcasting or spawning auto-complete, so the blocking
+                    // wait loop below doesn't miss the completion event.
                     state.task_store.insert(task.clone()).await;
+                    let blocking_rx = if blocking
+                        && !return_immediately
+                        && !task.status.state.is_terminal()
+                    {
+                        Some(state.subscribe_events())
+                    } else {
+                        None
+                    };
                     state.broadcast_event(StreamResponse::Task(task.clone()));
 
                     // Auto-complete: if the handler opts in and the task is
@@ -841,9 +851,8 @@ async fn handle_message_send(
                     }
 
                     // If blocking mode and not returnImmediately, wait for terminal state
-                    if blocking && !return_immediately && !task.status.state.is_terminal() {
+                    if let Some(mut rx) = blocking_rx {
                         let task_id = task.id.clone();
-                        let mut rx = state.subscribe_events();
 
                         let wait_result = timeout(BLOCKING_TIMEOUT, async {
                             loop {
@@ -1020,9 +1029,13 @@ async fn handle_message_stream(
 
     let task_id = task.id.clone();
     state.task_store.insert(task.clone()).await;
+
+    // Subscribe BEFORE broadcasting so we don't miss events the handler
+    // emits as part of this request. (Broadcast channel receivers only
+    // receive events sent after their creation.)
+    let mut rx = state.subscribe_events();
     state.broadcast_event(StreamResponse::Task(task.clone()));
 
-    let mut rx = state.subscribe_events();
     let task_store = state.task_store.clone();
     let target_task_id = task_id;
 
@@ -1032,9 +1045,17 @@ async fn handle_message_stream(
     };
 
     let stream = async_stream::stream! {
+        let initial_is_terminal = task.status.state.is_terminal();
+
         // Yield initial task via StreamingMessageResult for proper tagging
         if let Ok(val) = serde_json::to_value(StreamingMessageResult::Task(task)) {
             yield Ok::<_, Infallible>(Event::default().data(wrap(val)));
+        }
+
+        // If the handler already returned a terminal task, there will be no
+        // further events — end the stream now instead of hanging on rx.recv().
+        if initial_is_terminal {
+            return;
         }
 
         loop {

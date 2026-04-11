@@ -2,8 +2,15 @@
 //!
 //! Tests the JSON-RPC endpoints end-to-end.
 
-use a2a_rs_core::{JsonRpcResponse, Message, Part, Role, SendMessageResult, TaskState};
-use a2a_rs_server::A2aServer;
+use a2a_rs_core::{
+    now_iso8601, AgentCard, AgentCapabilities, AgentInterface, AgentSkill, JsonRpcResponse,
+    Message, Part, Role, SendMessageResponse, SendMessageResult, Task, TaskState, TaskStatus,
+    PROTOCOL_VERSION,
+};
+use a2a_rs_server::{A2aServer, AuthContext, HandlerResult, MessageHandler};
+use async_trait::async_trait;
+use std::time::Duration;
+use uuid::Uuid;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -836,4 +843,133 @@ async fn test_tck_generated_context_id() {
     let rpc2 = response_json(router.oneshot(req2).await.unwrap()).await;
     let task2 = extract_task(rpc2.result.unwrap());
     assert_ne!(task.context_id, task2.context_id, "each task should get unique contextId");
+}
+
+/// Regression: streaming handler that returns a terminal task immediately
+/// must not hang the SSE stream. Previously the stream would yield the
+/// initial task then await forever on a receiver that was subscribed
+/// AFTER the broadcast event was sent.
+struct TerminalStreamingHandler;
+
+#[async_trait]
+impl MessageHandler for TerminalStreamingHandler {
+    async fn handle_message(
+        &self,
+        message: Message,
+        _auth: Option<AuthContext>,
+    ) -> HandlerResult<SendMessageResponse> {
+        let ctx = message
+            .context_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        Ok(SendMessageResponse::Task(Task {
+            kind: "task".to_string(),
+            id: Uuid::new_v4().to_string(),
+            context_id: ctx,
+            status: TaskStatus {
+                state: TaskState::Completed,
+                message: None,
+                timestamp: Some(now_iso8601()),
+            },
+            history: Some(vec![message]),
+            artifacts: None,
+            metadata: None,
+        }))
+    }
+
+    fn agent_card(&self, _base_url: &str) -> AgentCard {
+        AgentCard {
+            name: "Terminal Streaming".to_string(),
+            description: "Test handler that returns terminal tasks".to_string(),
+            supported_interfaces: vec![AgentInterface {
+                url: String::new(),
+                protocol_binding: "JSONRPC".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                tenant: None,
+            }],
+            provider: None,
+            version: PROTOCOL_VERSION.to_string(),
+            documentation_url: None,
+            capabilities: AgentCapabilities {
+                streaming: Some(true),
+                ..Default::default()
+            },
+            security_schemes: Default::default(),
+            security_requirements: vec![],
+            default_input_modes: vec!["text".to_string()],
+            default_output_modes: vec!["text".to_string()],
+            skills: vec![AgentSkill {
+                id: "terminal".to_string(),
+                name: "Terminal".to_string(),
+                description: "Returns terminal tasks".to_string(),
+                tags: vec!["test".to_string()],
+                ..Default::default()
+            }],
+            signatures: vec![],
+            icon_url: None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_stream_terminal_initial_does_not_hang() {
+    let server = A2aServer::new(TerminalStreamingHandler)
+        .bind("127.0.0.1:0")
+        .expect("valid address");
+    let router = server.build_router();
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "SendStreamingMessage",
+        "params": { "message": test_message("stream-term-1", "go") },
+        "id": 1
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    // The stream must complete (not hang). Wrap in a short timeout to
+    // catch regressions quickly.
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        router.oneshot(request),
+    )
+    .await
+    .expect("streaming request timed out — the stream is hanging")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "expected SSE content-type, got {content_type}"
+    );
+
+    // The body must drain to EOF without hanging.
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(5),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("streaming body read timed out — the stream is hanging")
+    .unwrap()
+    .to_bytes();
+
+    let body_str = String::from_utf8(bytes.to_vec()).unwrap();
+    // Should contain at least one SSE data event wrapping the initial task.
+    assert!(
+        body_str.contains("data:"),
+        "expected SSE data event in body, got: {body_str}"
+    );
+    assert!(
+        body_str.contains("TASK_STATE_COMPLETED"),
+        "expected initial task event with completed state, got: {body_str}"
+    );
 }

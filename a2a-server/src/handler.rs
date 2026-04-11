@@ -184,7 +184,7 @@ impl MessageHandler for EchoHandler {
         }))
     }
 
-    fn agent_card(&self, base_url: &str) -> AgentCard {
+    fn agent_card(&self, _base_url: &str) -> AgentCard {
         use a2a_rs_core::{
             AgentCapabilities, AgentInterface, AgentProvider, AgentSkill, PROTOCOL_VERSION,
         };
