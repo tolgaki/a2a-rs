@@ -451,6 +451,23 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok", "protocol": PROTOCOL_VERSION}))
 }
 
+/// Wrap a JSON-RPC error envelope in a single-event SSE response.
+///
+/// Per the A2A spec, streaming methods MUST always return
+/// `text/event-stream`. When the server needs to surface a JSON-RPC
+/// error (parse error, invalid params, task not found, terminal task,
+/// etc.), it goes out as a single SSE `data:` event followed by stream
+/// close, instead of as an `application/json` response.
+fn sse_error_response(envelope: JsonRpcResponse) -> Response {
+    let body = serde_json::to_string(&envelope).unwrap_or_default();
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(Event::default().data(body));
+    };
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
 async fn agent_card(State(state): State<AppState>) -> Response {
     let card = (*state.card).clone();
     // Compute a stable ETag from the serialized card content.
@@ -958,16 +975,12 @@ async fn handle_message_stream(
     let req_id = req.id.clone();
 
     if !state.streaming_enabled() {
-        return (
-            StatusCode::OK,
-            Json(error(
-                req_id,
-                errors::UNSUPPORTED_OPERATION,
-                "streaming not supported by this agent",
-                None,
-            )),
-        )
-            .into_response();
+        return sse_error_response(error(
+            req_id,
+            errors::UNSUPPORTED_OPERATION,
+            "streaming not supported by this agent",
+            None,
+        ));
     }
 
     let params: Result<SendMessageRequest, _> =
@@ -976,16 +989,12 @@ async fn handle_message_stream(
     let params = match params {
         Ok(p) => p,
         Err(err) => {
-            return (
-                StatusCode::OK,
-                Json(error(
-                    req_id,
-                    errors::INVALID_PARAMS,
-                    "invalid params",
-                    Some(serde_json::json!({"error": err.to_string()})),
-                )),
-            )
-                .into_response();
+            return sse_error_response(error(
+                req_id,
+                errors::INVALID_PARAMS,
+                "invalid params",
+                Some(serde_json::json!({"error": err.to_string()})),
+            ));
         }
     };
 
@@ -998,24 +1007,26 @@ async fn handle_message_stream(
     {
         Ok(r) => r,
         Err(e) => {
-            let (code, status) = handler_error_to_rpc(&e);
-            return (status, Json(error(req_id, code, &e.to_string(), None))).into_response();
+            let (code, _) = handler_error_to_rpc(&e);
+            return sse_error_response(error(req_id, code, &e.to_string(), None));
         }
     };
 
-    // Extract task from response (streaming only works with tasks)
+    // Streaming supports both Task and Message responses. A Message response
+    // is yielded as a single SSE event then the stream closes.
     let mut task = match response {
         SendMessageResponse::Task(t) => t,
-        SendMessageResponse::Message(_) => {
-            return (
-                StatusCode::OK,
-                Json(error(
-                    req_id,
-                    errors::UNSUPPORTED_OPERATION,
-                    "handler returned a message, streaming requires a task",
-                    None,
-                )),
-            )
+        SendMessageResponse::Message(msg) => {
+            let req_id_inner = req_id.clone();
+            let stream = async_stream::stream! {
+                if let Ok(val) = serde_json::to_value(StreamingMessageResult::Message(msg)) {
+                    let envelope = success(req_id_inner.clone(), val);
+                    let body = serde_json::to_string(&envelope).unwrap_or_default();
+                    yield Ok::<_, Infallible>(Event::default().data(body));
+                }
+            };
+            return Sse::new(stream)
+                .keep_alive(KeepAlive::default())
                 .into_response();
         }
     };
@@ -1286,16 +1297,12 @@ async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Respo
     let params = match params {
         Ok(p) => p,
         Err(err) => {
-            return (
-                StatusCode::OK,
-                Json(error(
-                    req_id,
-                    errors::INVALID_PARAMS,
-                    "invalid params",
-                    Some(serde_json::json!({"error": err.to_string()})),
-                )),
-            )
-                .into_response();
+            return sse_error_response(error(
+                req_id,
+                errors::INVALID_PARAMS,
+                "invalid params",
+                Some(serde_json::json!({"error": err.to_string()})),
+            ));
         }
     };
 
@@ -1303,18 +1310,25 @@ async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Respo
     let task = match state.task_store.get_flexible(&params.id).await {
         Some(t) => t,
         None => {
-            return (
-                StatusCode::OK,
-                Json(error(
-                    req_id,
-                    errors::TASK_NOT_FOUND,
-                    "task not found",
-                    None,
-                )),
-            )
-                .into_response();
+            return sse_error_response(error(
+                req_id,
+                errors::TASK_NOT_FOUND,
+                "task not found",
+                None,
+            ));
         }
     };
+
+    // Reject subscriptions to terminal tasks (STREAM-SUB-003): the spec
+    // says SubscribeToTask on a terminal task MUST return an error.
+    if task.status.state.is_terminal() {
+        return sse_error_response(error(
+            req_id,
+            errors::UNSUPPORTED_OPERATION,
+            "cannot subscribe to a task in terminal state",
+            None,
+        ));
+    }
 
     let target_task_id = task.id.clone();
     let mut rx = state.subscribe_events();
@@ -1328,11 +1342,6 @@ async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Respo
         // Yield current task snapshot via StreamingMessageResult
         if let Ok(val) = serde_json::to_value(StreamingMessageResult::Task(task.clone())) {
             yield Ok::<_, Infallible>(Event::default().data(wrap(val)));
-        }
-
-        // If already terminal, stop
-        if task.status.state.is_terminal() {
-            return;
         }
 
         loop {
