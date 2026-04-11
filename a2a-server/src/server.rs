@@ -156,12 +156,13 @@ impl A2aServer {
         let rpc_path = self.config.rpc_path.clone();
         let full_rpc_url = format!("{}{}", base_url, rpc_path);
 
-        // Let the handler produce its card, then rewrite JSONRPC interface URLs
-        // to match the server's configured rpc_path so the agent card always
-        // advertises the right endpoint.
+        // Let the handler produce its card. The handler is the authoritative
+        // source of interface URLs — it knows whether the server is mounted
+        // under a path prefix, behind a reverse proxy, etc. We only fill in a
+        // default URL when the handler left the field empty.
         let mut card_value = self.handler.agent_card(&base_url);
         for iface in card_value.supported_interfaces.iter_mut() {
-            if iface.protocol_binding.eq_ignore_ascii_case("jsonrpc") {
+            if iface.protocol_binding.eq_ignore_ascii_case("jsonrpc") && iface.url.is_empty() {
                 iface.url = full_rpc_url.clone();
             }
         }

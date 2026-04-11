@@ -194,7 +194,10 @@ impl MessageHandler for EchoHandler {
             description: "Echo agent — reflects input, auto-completes after a short delay"
                 .to_string(),
             supported_interfaces: vec![AgentInterface {
-                url: format!("{}/v1/rpc", base_url),
+                // Leave URL empty — the server fills it in based on
+                // bind address + configured rpc_path. Custom handlers
+                // that know their public URL should set it explicitly.
+                url: String::new(),
                 protocol_binding: "JSONRPC".to_string(),
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 tenant: None,
