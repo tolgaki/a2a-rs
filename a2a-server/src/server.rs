@@ -243,6 +243,13 @@ impl A2aServer {
             )
             .route(&rpc_path, post(handle_rpc));
 
+        // Also accept JSON-RPC POSTs on the root path `/` for interop with
+        // clients (.NET, Swift) that POST to the constructor URL rather than
+        // reading `supportedInterfaces[].url` from the agent card.
+        if rpc_path != "/" {
+            timed_routes = timed_routes.route("/", post(handle_rpc));
+        }
+
         // Catch-all fallback: route POST requests on any unregistered path
         // through the JSON-RPC handler so compliance tests work regardless
         // of which URL they target.
