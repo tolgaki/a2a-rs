@@ -372,7 +372,10 @@ impl A2aClient {
         Ok(result)
     }
 
-    /// Make a REST SSE streaming call
+    /// Make a REST SSE streaming call.
+    ///
+    /// Uses POST for calls with a body (message:stream) and GET for
+    /// body-less calls (tasks/{id}:subscribe) per the A2A REST binding.
     async fn rest_sse_call<P: Serialize>(
         &self,
         path: &str,
@@ -382,7 +385,11 @@ impl A2aClient {
         let base = self.get_cached_endpoint().await?;
         let url = format!("{}{}", base.trim_end_matches('/'), path);
 
-        let mut req_builder = self.http.post(&url);
+        let mut req_builder = if body.is_some() {
+            self.http.post(&url) // POST for message:stream
+        } else {
+            self.http.get(&url) // GET for tasks/{id}:subscribe
+        };
         req_builder = req_builder.header("A2A-Version", "1.0");
         if let Some(token) = session_token {
             req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
@@ -558,9 +565,10 @@ impl A2aClient {
     /// Cancel a task by ID
     pub async fn cancel_task(&self, task_id: &str, session_token: Option<&str>) -> Result<Task> {
         if self.config.transport == Transport::Rest {
+            // Per A2A v1.0 REST binding §11.3.2: POST /tasks/{id}:cancel
             let path = format!("/tasks/{}:cancel", urlencoding::encode(task_id));
             return self
-                .rest_call::<(), Task>(reqwest::Method::DELETE, &path, None, session_token)
+                .rest_call::<(), Task>(reqwest::Method::POST, &path, None, session_token)
                 .await;
         }
         let params = CancelTaskRequest {
