@@ -564,6 +564,23 @@ impl Part {
         }
     }
 
+    /// Create a file part with a URI reference and explicit filename
+    pub fn file_uri_named(
+        uri: impl Into<String>,
+        mime_type: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Part::File {
+            file: FileContent {
+                bytes: None,
+                uri: Some(uri.into()),
+                name: Some(name.into()),
+                mime_type: Some(mime_type.into()),
+            },
+            metadata: None,
+        }
+    }
+
     /// Create a file part with inline bytes (base64-encoded)
     pub fn file_bytes(bytes: impl Into<String>, mime_type: impl Into<String>) -> Self {
         Part::File {
@@ -571,6 +588,23 @@ impl Part {
                 bytes: Some(bytes.into()),
                 uri: None,
                 name: None,
+                mime_type: Some(mime_type.into()),
+            },
+            metadata: None,
+        }
+    }
+
+    /// Create a file part with inline bytes and explicit filename
+    pub fn file_bytes_named(
+        bytes: impl Into<String>,
+        mime_type: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Part::File {
+            file: FileContent {
+                bytes: Some(bytes.into()),
+                uri: None,
+                name: Some(name.into()),
                 mime_type: Some(mime_type.into()),
             },
             metadata: None,

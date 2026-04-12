@@ -170,8 +170,11 @@ struct OAuthAuthorizeResponse {
 impl A2aClient {
     /// Create a new A2A client with the given configuration
     pub fn new(config: ClientConfig) -> Result<Self> {
-        let base_url = Url::parse(&config.server_url)
+        let mut base_url = Url::parse(&config.server_url)
             .with_context(|| format!("Invalid server URL: {}", config.server_url))?;
+        if !base_url.path().ends_with('/') {
+            base_url.set_path(&format!("{}/", base_url.path()));
+        }
         let http = config.http_client.clone().unwrap_or_default();
 
         Ok(Self {
@@ -209,7 +212,7 @@ impl A2aClient {
         }
 
         // Fetch fresh card
-        let url = self.base_url.join("/.well-known/agent-card.json")?;
+        let url = self.base_url.join(".well-known/agent-card.json")?;
         let card: AgentCard = self
             .http
             .get(url)
@@ -590,7 +593,7 @@ impl A2aClient {
         session_token: Option<&str>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamingMessageResult>> + Send>>> {
         if self.config.transport == Transport::Rest {
-            let path = format!("/tasks/{}/subscribe", urlencoding::encode(task_id));
+            let path = format!("/tasks/{}:subscribe", urlencoding::encode(task_id));
             return self.rest_sse_call::<()>(&path, None, session_token).await;
         }
 

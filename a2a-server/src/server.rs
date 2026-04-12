@@ -527,9 +527,10 @@ async fn handle_rpc(
     // Check Content-Type header — must be application/json (or absent).
     if let Some(ct) = headers.get(axum::http::header::CONTENT_TYPE) {
         let ct_str = ct.to_str().unwrap_or("");
-        if !ct_str.is_empty()
-            && !ct_str.starts_with("application/json")
-            && !ct_str.starts_with("application/jsonrequest")
+        let media_type = ct_str.split(';').next().unwrap_or("").trim();
+        if !media_type.is_empty()
+            && !media_type.eq_ignore_ascii_case("application/json")
+            && !media_type.eq_ignore_ascii_case("application/jsonrequest")
         {
             let resp = error(
                 serde_json::Value::Null,
