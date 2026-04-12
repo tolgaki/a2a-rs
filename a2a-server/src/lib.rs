@@ -54,6 +54,7 @@
 //! ```
 
 mod handler;
+mod rest;
 mod server;
 mod task_store;
 mod webhook_delivery;

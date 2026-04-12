@@ -46,6 +46,9 @@ pub struct ServerConfig {
     pub bind_address: String,
     /// HTTP path where the JSON-RPC endpoint is exposed. Must start with `/`.
     pub rpc_path: String,
+    /// HTTP path prefix for the REST / HTTP+JSON binding (e.g. `/v1`).
+    /// Set to `None` to disable REST. Default: `Some("/v1")`.
+    pub rest_prefix: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -53,6 +56,7 @@ impl Default for ServerConfig {
         Self {
             bind_address: "0.0.0.0:8080".to_string(),
             rpc_path: "/v1/rpc".to_string(),
+            rest_prefix: Some("/v1".to_string()),
         }
     }
 }
@@ -114,6 +118,19 @@ impl A2aServer {
         self
     }
 
+    /// Configure the HTTP path prefix for the REST / HTTP+JSON binding
+    /// (e.g. `/v1`). Set to `None` to disable REST routes. Defaults to `/v1`.
+    pub fn rest_prefix(mut self, prefix: Option<&str>) -> Self {
+        self.config.rest_prefix = prefix.map(|p| {
+            if p.starts_with('/') {
+                p.to_string()
+            } else {
+                format!("/{}", p)
+            }
+        });
+        self
+    }
+
     pub fn task_store(mut self, store: TaskStore) -> Self {
         self.task_store = store;
         self
@@ -156,16 +173,48 @@ impl A2aServer {
         let rpc_path = self.config.rpc_path.clone();
         let full_rpc_url = format!("{}{}", base_url, rpc_path);
 
+        let rest_prefix = self.config.rest_prefix.clone();
+
         // Let the handler produce its card. The handler is the authoritative
         // source of interface URLs — it knows whether the server is mounted
         // under a path prefix, behind a reverse proxy, etc. We only fill in a
         // default URL when the handler left the field empty.
         let mut card_value = self.handler.agent_card(&base_url);
+        let mut has_jsonrpc = false;
+        let mut has_http_json = false;
         for iface in card_value.supported_interfaces.iter_mut() {
-            if iface.protocol_binding.eq_ignore_ascii_case("jsonrpc") && iface.url.is_empty() {
-                iface.url = full_rpc_url.clone();
+            if iface.protocol_binding.eq_ignore_ascii_case("jsonrpc") {
+                has_jsonrpc = true;
+                if iface.url.is_empty() {
+                    iface.url = full_rpc_url.clone();
+                }
+            }
+            if iface.protocol_binding.eq_ignore_ascii_case("http+json") {
+                has_http_json = true;
+                if iface.url.is_empty() {
+                    if let Some(ref prefix) = rest_prefix {
+                        iface.url = format!("{}{}", base_url, prefix);
+                    }
+                }
             }
         }
+        // Auto-add an HTTP+JSON interface if REST is enabled but the handler
+        // didn't declare one.
+        if rest_prefix.is_some() && !has_http_json {
+            let rest_url = rest_prefix
+                .as_ref()
+                .map(|p| format!("{}{}", base_url, p))
+                .unwrap_or_default();
+            card_value
+                .supported_interfaces
+                .push(a2a_rs_core::AgentInterface {
+                    url: rest_url,
+                    protocol_binding: "HTTP+JSON".to_string(),
+                    protocol_version: a2a_rs_core::PROTOCOL_VERSION.to_string(),
+                    tenant: None,
+                });
+        }
+        let _ = has_jsonrpc; // suppress warning
         let card = Arc::new(card_value);
 
         let state = AppState {
@@ -176,6 +225,7 @@ impl A2aServer {
             auth_extractor: self.auth_extractor,
             event_tx: self.event_tx,
             rpc_path: rpc_path.clone(),
+            rest_prefix: rest_prefix.clone(),
         };
 
         // Register agent card on both well-known paths (v1.0 and v0.2 fallback).
@@ -295,6 +345,7 @@ pub struct AppState {
     auth_extractor: Option<AuthExtractor>,
     event_tx: broadcast::Sender<StreamResponse>,
     rpc_path: String,
+    rest_prefix: Option<String>,
 }
 
 impl AppState {
@@ -318,6 +369,21 @@ impl AppState {
         let _ = self.event_tx.send(event);
     }
 
+    /// Reference to the handler (used by REST module).
+    pub(crate) fn handler_ref(&self) -> &dyn crate::handler::MessageHandler {
+        self.handler.as_ref()
+    }
+
+    /// Reference to the auth extractor (used by REST module).
+    pub(crate) fn auth_extractor_ref(&self) -> Option<&AuthExtractor> {
+        self.auth_extractor.as_ref()
+    }
+
+    /// Reference to the webhook store (used by REST module).
+    pub(crate) fn webhook_store_ref(&self) -> &WebhookStore {
+        &self.webhook_store
+    }
+
     /// Check if streaming is enabled in capabilities
     fn streaming_enabled(&self) -> bool {
         self.card.capabilities.streaming.unwrap_or(false)
@@ -329,7 +395,7 @@ impl AppState {
     }
 
     /// Get the endpoint URL from the agent card
-    fn endpoint_url(&self) -> &str {
+    pub(crate) fn endpoint_url(&self) -> &str {
         self.card.endpoint().unwrap_or("")
     }
 
@@ -337,11 +403,16 @@ impl AppState {
     pub fn rpc_path(&self) -> &str {
         &self.rpc_path
     }
+
+    /// Return the configured REST prefix (e.g. `/v1`).
+    pub fn rest_prefix(&self) -> Option<&str> {
+        self.rest_prefix.as_deref()
+    }
 }
 
 // ============ History Trimming ============
 
-fn apply_history_length(task: &mut Task, history_length: Option<u32>) {
+pub(crate) fn apply_history_length(task: &mut Task, history_length: Option<u32>) {
     match history_length {
         Some(0) => {
             task.history = None;
@@ -500,15 +571,27 @@ async fn agent_card(State(state): State<AppState>) -> Response {
     resp
 }
 
-/// Fallback handler: forwards POST requests to the JSON-RPC handler so
-/// compliance tests work no matter which URL they target. Non-POST requests
-/// get a standard 404.
+/// Fallback handler: first tries REST dispatch (if REST is enabled and the
+/// path matches the REST prefix), then falls through to the JSON-RPC handler
+/// for POST requests.
 async fn handle_rpc_fallback(
     method: Method,
     State(state): State<AppState>,
     headers: HeaderMap,
+    uri: axum::http::Uri,
     body: axum::body::Bytes,
 ) -> Response {
+    // Try REST dispatch first
+    if let Some(prefix) = state.rest_prefix() {
+        let prefix = prefix.to_string();
+        if let Some(resp) =
+            crate::rest::try_rest_dispatch(&state, &method, &headers, &uri, &body, &prefix).await
+        {
+            return resp;
+        }
+    }
+
+    // Fall through to JSON-RPC for POST requests
     if method == Method::POST {
         handle_rpc(State(state), headers, body).await
     } else {
@@ -702,7 +785,7 @@ async fn handle_rpc(
     }
 }
 
-fn handler_error_to_rpc(e: &HandlerError) -> (i32, StatusCode) {
+pub(crate) fn handler_error_to_rpc(e: &HandlerError) -> (i32, StatusCode) {
     // JSON-RPC 2.0 convention: always return HTTP 200 with the error envelope
     // in the body. Tests (including the A2A TCK) expect this.
     let code = match e {
