@@ -381,6 +381,10 @@ pub enum Part {
         text: String,
         /// Part-level metadata
         metadata: Option<serde_json::Value>,
+        /// Optional filename
+        filename: Option<String>,
+        /// Optional MIME type
+        media_type: Option<String>,
     },
     /// File content part (inline bytes or URI reference)
     File {
@@ -388,6 +392,10 @@ pub enum Part {
         file: FileContent,
         /// Part-level metadata
         metadata: Option<serde_json::Value>,
+        /// Optional filename
+        filename: Option<String>,
+        /// Optional MIME type
+        media_type: Option<String>,
     },
     /// Structured data part
     Data {
@@ -395,22 +403,45 @@ pub enum Part {
         data: serde_json::Value,
         /// Part-level metadata
         metadata: Option<serde_json::Value>,
+        /// Optional filename
+        filename: Option<String>,
+        /// Optional MIME type
+        media_type: Option<String>,
     },
 }
 
 impl Serialize for Part {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
+
+        // Helper to emit common trailing fields (filename, mediaType, metadata)
+        fn emit_common<S: serde::Serializer>(
+            map: &mut <S as serde::Serializer>::SerializeMap,
+            filename: &Option<String>,
+            media_type: &Option<String>,
+            metadata: &Option<serde_json::Value>,
+        ) -> Result<(), S::Error> {
+            use serde::ser::SerializeMap as _;
+            if let Some(ref f) = *filename {
+                map.serialize_entry("filename", f)?;
+            }
+            if let Some(ref mt) = *media_type {
+                map.serialize_entry("mediaType", mt)?;
+            }
+            if let Some(ref m) = *metadata {
+                map.serialize_entry("metadata", m)?;
+            }
+            Ok(())
+        }
+
         match self {
-            Part::Text { text, metadata } => {
+            Part::Text { text, metadata, filename, media_type } => {
                 let mut map = serializer.serialize_map(None)?;
                 map.serialize_entry("text", text)?;
-                if let Some(m) = metadata {
-                    map.serialize_entry("metadata", m)?;
-                }
+                emit_common::<S>(&mut map, filename, media_type, metadata)?;
                 map.end()
             }
-            Part::File { file, metadata } => {
+            Part::File { file, metadata, filename, media_type } => {
                 // v1.0 flat format: fields are top-level in the Part, not nested
                 // under "file". Field names: url, raw, filename, mediaType.
                 let mut map = serializer.serialize_map(None)?;
@@ -420,23 +451,25 @@ impl Serialize for Part {
                 if let Some(ref bytes) = file.bytes {
                     map.serialize_entry("raw", bytes)?;
                 }
-                if let Some(ref name) = file.name {
-                    map.serialize_entry("filename", name)?;
+                // For File variant, the filename/mediaType come from the
+                // top-level Part fields; fall back to FileContent fields.
+                let effective_filename = filename.as_ref().or(file.name.as_ref());
+                let effective_media_type = media_type.as_ref().or(file.mime_type.as_ref());
+                if let Some(f) = effective_filename {
+                    map.serialize_entry("filename", f)?;
                 }
-                if let Some(ref mime) = file.mime_type {
-                    map.serialize_entry("mediaType", mime)?;
+                if let Some(mt) = effective_media_type {
+                    map.serialize_entry("mediaType", mt)?;
                 }
                 if let Some(m) = metadata {
                     map.serialize_entry("metadata", m)?;
                 }
                 map.end()
             }
-            Part::Data { data, metadata } => {
+            Part::Data { data, metadata, filename, media_type } => {
                 let mut map = serializer.serialize_map(None)?;
                 map.serialize_entry("data", data)?;
-                if let Some(m) = metadata {
-                    map.serialize_entry("metadata", m)?;
-                }
+                emit_common::<S>(&mut map, filename, media_type, metadata)?;
                 map.end()
             }
         }
@@ -450,6 +483,15 @@ impl<'de> Deserialize<'de> for Part {
             .as_object()
             .ok_or_else(|| serde::de::Error::custom("expected object for Part"))?;
         let metadata = obj.get("metadata").cloned();
+        let filename = obj
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let media_type = obj
+            .get("mediaType")
+            .or_else(|| obj.get("media_type"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         if let Some(text) = obj.get("text") {
             Ok(Part::Text {
@@ -458,15 +500,19 @@ impl<'de> Deserialize<'de> for Part {
                     .ok_or_else(|| serde::de::Error::custom("text must be a string"))?
                     .to_string(),
                 metadata,
+                filename,
+                media_type,
             })
         } else if let Some(file) = obj.get("file") {
             let file: FileContent =
                 serde_json::from_value(file.clone()).map_err(serde::de::Error::custom)?;
-            Ok(Part::File { file, metadata })
+            Ok(Part::File { file, metadata, filename, media_type })
         } else if let Some(data) = obj.get("data") {
             Ok(Part::Data {
                 data: data.clone(),
                 metadata,
+                filename,
+                media_type,
             })
         } else if obj.contains_key("raw") || obj.contains_key("url") {
             // Proto-style: raw/url as top-level fields (not nested under file)
@@ -479,17 +525,10 @@ impl<'de> Deserialize<'de> for Part {
                     .get("url")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
-                name: obj
-                    .get("filename")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                mime_type: obj
-                    .get("mediaType")
-                    .or_else(|| obj.get("mimeType"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
+                name: filename.clone(),
+                mime_type: media_type.clone(),
             };
-            Ok(Part::File { file, metadata })
+            Ok(Part::File { file, metadata, filename, media_type })
         } else if obj.contains_key("kind") {
             // v0.3 compatibility: handle kind-discriminated parts
             let kind = obj["kind"].as_str().unwrap_or("");
@@ -501,16 +540,20 @@ impl<'de> Deserialize<'de> for Part {
                         .unwrap_or("")
                         .to_string(),
                     metadata,
+                    filename,
+                    media_type,
                 }),
                 "file" => {
                     let file: FileContent =
                         serde_json::from_value(obj.get("file").cloned().unwrap_or_default())
                             .map_err(serde::de::Error::custom)?;
-                    Ok(Part::File { file, metadata })
+                    Ok(Part::File { file, metadata, filename, media_type })
                 }
                 "data" => Ok(Part::Data {
                     data: obj.get("data").cloned().unwrap_or_default(),
                     metadata,
+                    filename,
+                    media_type,
                 }),
                 _ => Err(serde::de::Error::custom(format!(
                     "unknown part kind: {kind}"
@@ -548,6 +591,8 @@ impl Part {
         Part::Text {
             text: text.into(),
             metadata: None,
+            filename: None,
+            media_type: None,
         }
     }
 
@@ -561,6 +606,8 @@ impl Part {
                 mime_type: Some(mime_type.into()),
             },
             metadata: None,
+            filename: None,
+            media_type: None,
         }
     }
 
@@ -578,6 +625,8 @@ impl Part {
                 mime_type: Some(mime_type.into()),
             },
             metadata: None,
+            filename: None,
+            media_type: None,
         }
     }
 
@@ -591,6 +640,8 @@ impl Part {
                 mime_type: Some(mime_type.into()),
             },
             metadata: None,
+            filename: None,
+            media_type: None,
         }
     }
 
@@ -608,6 +659,8 @@ impl Part {
                 mime_type: Some(mime_type.into()),
             },
             metadata: None,
+            filename: None,
+            media_type: None,
         }
     }
 
@@ -616,6 +669,8 @@ impl Part {
         Part::Data {
             data,
             metadata: None,
+            filename: None,
+            media_type: None,
         }
     }
 
@@ -862,10 +917,10 @@ pub mod errors {
     pub const PUSH_NOTIFICATION_NOT_SUPPORTED: i32 = -32003;
     pub const UNSUPPORTED_OPERATION: i32 = -32004;
     pub const CONTENT_TYPE_NOT_SUPPORTED: i32 = -32005;
-    pub const EXTENDED_AGENT_CARD_NOT_CONFIGURED: i32 = -32006;
+    pub const INVALID_AGENT_RESPONSE: i32 = -32006;
+    pub const EXTENDED_AGENT_CARD_NOT_CONFIGURED: i32 = -32007;
+    pub const EXTENSION_SUPPORT_REQUIRED: i32 = -32008;
     pub const VERSION_NOT_SUPPORTED: i32 = -32009;
-    pub const INVALID_AGENT_RESPONSE: i32 = -32008;
-    pub const EXTENSION_SUPPORT_REQUIRED: i32 = -32010;
 
     pub fn message_for_code(code: i32) -> &'static str {
         match code {
@@ -897,12 +952,37 @@ pub fn success(id: serde_json::Value, result: serde_json::Value) -> JsonRpcRespo
     }
 }
 
+/// Build a google.rpc.ErrorInfo data payload for A2A-specific error codes.
+/// Returns `None` for standard JSON-RPC errors (parse, invalid request, etc.).
+pub fn error_info_data(code: i32) -> Option<serde_json::Value> {
+    let reason = match code {
+        errors::TASK_NOT_FOUND => "TASK_NOT_FOUND",
+        errors::TASK_NOT_CANCELABLE => "TASK_NOT_CANCELABLE",
+        errors::PUSH_NOTIFICATION_NOT_SUPPORTED => "PUSH_NOTIFICATION_NOT_SUPPORTED",
+        errors::UNSUPPORTED_OPERATION => "UNSUPPORTED_OPERATION",
+        errors::CONTENT_TYPE_NOT_SUPPORTED => "CONTENT_TYPE_NOT_SUPPORTED",
+        errors::INVALID_AGENT_RESPONSE => "INVALID_AGENT_RESPONSE",
+        errors::EXTENDED_AGENT_CARD_NOT_CONFIGURED => "EXTENDED_AGENT_CARD_NOT_CONFIGURED",
+        errors::EXTENSION_SUPPORT_REQUIRED => "EXTENSION_SUPPORT_REQUIRED",
+        errors::VERSION_NOT_SUPPORTED => "VERSION_NOT_SUPPORTED",
+        _ => return None,
+    };
+    Some(serde_json::json!([{
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": reason,
+        "domain": "a2a-protocol.org"
+    }]))
+}
+
 pub fn error(
     id: serde_json::Value,
     code: i32,
     message: &str,
     data: Option<serde_json::Value>,
 ) -> JsonRpcResponse {
+    // For A2A-specific errors, automatically include ErrorInfo when no
+    // explicit data is provided.
+    let data = data.or_else(|| error_info_data(code));
     JsonRpcResponse {
         jsonrpc: "2.0".to_string(),
         id,
@@ -943,13 +1023,10 @@ pub struct SendMessageConfiguration {
     pub accepted_output_modes: Option<Vec<String>>,
     /// Push notification configuration for this request
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub push_notification_config: Option<PushNotificationConfig>,
+    pub task_push_notification_config: Option<TaskPushNotificationConfig>,
     /// Message history depth (0 = omit, None = server default)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub history_length: Option<u32>,
-    /// Wait for task completion (default: false)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocking: Option<bool>,
+    pub history_length: Option<i32>,
     /// Return immediately without waiting for completion (default: false).
     /// When true, the server returns the task in its current state even if non-terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -964,7 +1041,7 @@ pub struct GetTaskRequest {
     pub id: String,
     /// Message history depth
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub history_length: Option<u32>,
+    pub history_length: Option<i32>,
     /// Optional tenant
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant: Option<String>,
@@ -979,6 +1056,9 @@ pub struct CancelTaskRequest {
     /// Optional tenant
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant: Option<String>,
+    /// Custom metadata
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Parameters for tasks/list operation
@@ -993,13 +1073,13 @@ pub struct ListTasksRequest {
     pub status: Option<TaskState>,
     /// Results per page (1-100, default 50)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub page_size: Option<u32>,
+    pub page_size: Option<i32>,
     /// Pagination cursor
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_token: Option<String>,
     /// History depth per task
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub history_length: Option<u32>,
+    pub history_length: Option<i32>,
     /// Filter by status timestamp after (accepts ISO 8601 string or epoch millis)
     #[serde(
         default,
@@ -1024,9 +1104,9 @@ pub struct TaskListResponse {
     /// Empty string if this is the final page
     pub next_page_token: String,
     /// Requested page size
-    pub page_size: u32,
+    pub page_size: i32,
     /// Total matching tasks
-    pub total_size: u32,
+    pub total_size: i32,
 }
 
 /// Parameters for tasks/subscribe operation
@@ -1068,19 +1148,25 @@ pub struct AuthenticationInfo {
     pub credentials: Option<String>,
 }
 
-/// Wrapper for push notification config with task context
+/// Flat push notification config with task context per proto spec
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskPushNotificationConfig {
+    /// Optional tenant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
     /// Configuration ID
     pub id: String,
     /// Associated task ID
     pub task_id: String,
-    /// The push notification configuration
-    pub push_notification_config: PushNotificationConfig,
-    /// Optional tenant
+    /// Webhook URL to receive notifications
+    pub url: String,
+    /// Token for webhook authentication
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tenant: Option<String>,
+    pub token: Option<String>,
+    /// Authentication details for webhook delivery
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<AuthenticationInfo>,
 }
 
 /// Parameters for tasks/pushNotificationConfig/create
@@ -1091,8 +1177,14 @@ pub struct CreateTaskPushNotificationConfigRequest {
     pub task_id: String,
     /// Configuration identifier
     pub config_id: String,
-    /// Configuration details
-    pub push_notification_config: PushNotificationConfig,
+    /// Webhook URL
+    pub url: String,
+    /// Optional token for webhook authentication
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// Optional authentication details
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<AuthenticationInfo>,
     /// Optional tenant
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant: Option<String>,
@@ -1119,7 +1211,7 @@ pub struct ListTaskPushNotificationConfigRequest {
     pub task_id: String,
     /// Max configs to return
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub page_size: Option<u32>,
+    pub page_size: Option<i32>,
     /// Pagination cursor
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_token: Option<String>,
@@ -1190,9 +1282,6 @@ pub struct TaskStatusUpdateEvent {
     pub context_id: String,
     /// Updated status
     pub status: TaskStatus,
-    /// Whether this is the final event in the stream
-    #[serde(rename = "final", default)]
-    pub is_final: bool,
     /// Custom metadata
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
@@ -1562,7 +1651,6 @@ mod tests {
                 message: None,
                 timestamp: None,
             },
-            is_final: false,
             metadata: None,
         });
         let json = serde_json::to_string(&event).unwrap();

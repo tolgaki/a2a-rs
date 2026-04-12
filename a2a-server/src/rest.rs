@@ -22,8 +22,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Json;
 use futures::future::FutureExt;
 use serde::Deserialize;
 use tokio::sync::broadcast;
@@ -41,6 +40,10 @@ use crate::task_store::TaskStore;
 // ── AIP-193 error helper ──────────────────────────────────────────────────
 
 fn aip_error(status: StatusCode, message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    aip_error_with_reason(status, message, reason_for_status(status))
+}
+
+fn aip_error_with_reason(status: StatusCode, message: &str, reason: &str) -> (StatusCode, Json<serde_json::Value>) {
     (
         status,
         Json(serde_json::json!({
@@ -48,9 +51,28 @@ fn aip_error(status: StatusCode, message: &str) -> (StatusCode, Json<serde_json:
                 "code": status.as_u16(),
                 "message": message,
                 "status": grpc_status_for(status),
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": reason,
+                    "domain": "a2a-protocol.org"
+                }]
             }
         })),
     )
+}
+
+fn reason_for_status(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 => "INVALID_ARGUMENT",
+        401 => "UNAUTHENTICATED",
+        404 => "NOT_FOUND",
+        405 => "METHOD_NOT_ALLOWED",
+        409 => "FAILED_PRECONDITION",
+        415 => "UNSUPPORTED_MEDIA_TYPE",
+        500 => "INTERNAL",
+        502 => "BAD_GATEWAY",
+        _ => "UNKNOWN",
+    }
 }
 
 fn grpc_status_for(status: StatusCode) -> &'static str {
@@ -75,6 +97,7 @@ fn a2a_error_to_http(code: i32) -> StatusCode {
         errors::CONTENT_TYPE_NOT_SUPPORTED => StatusCode::UNSUPPORTED_MEDIA_TYPE, // 415
         errors::INVALID_AGENT_RESPONSE => StatusCode::BAD_GATEWAY,           // 502
         errors::EXTENDED_AGENT_CARD_NOT_CONFIGURED => StatusCode::BAD_REQUEST, // 400
+        errors::EXTENSION_SUPPORT_REQUIRED => StatusCode::BAD_REQUEST,       // 400
         errors::VERSION_NOT_SUPPORTED => StatusCode::BAD_REQUEST,             // 400
         errors::INVALID_PARAMS => StatusCode::BAD_REQUEST,                    // 400
         errors::METHOD_NOT_FOUND => StatusCode::NOT_FOUND,                    // 404
@@ -87,10 +110,30 @@ fn a2a_error_to_http(code: i32) -> StatusCode {
 fn handler_error_response(e: &crate::handler::HandlerError) -> Response {
     let (code, _) = crate::server::handler_error_to_rpc(e);
     let status = a2a_error_to_http(code);
-    aip_error(status, &e.to_string()).into_response()
+    let reason = a2a_error_reason(code);
+    aip_error_with_reason(status, &e.to_string(), reason).into_response()
 }
 
-fn apply_history_length(task: &mut a2a_rs_core::Task, history_length: Option<u32>) {
+fn a2a_error_reason(code: i32) -> &'static str {
+    match code {
+        errors::TASK_NOT_FOUND => "TASK_NOT_FOUND",
+        errors::TASK_NOT_CANCELABLE => "TASK_NOT_CANCELABLE",
+        errors::PUSH_NOTIFICATION_NOT_SUPPORTED => "PUSH_NOTIFICATION_NOT_SUPPORTED",
+        errors::UNSUPPORTED_OPERATION => "UNSUPPORTED_OPERATION",
+        errors::CONTENT_TYPE_NOT_SUPPORTED => "CONTENT_TYPE_NOT_SUPPORTED",
+        errors::INVALID_AGENT_RESPONSE => "INVALID_AGENT_RESPONSE",
+        errors::EXTENDED_AGENT_CARD_NOT_CONFIGURED => "EXTENDED_AGENT_CARD_NOT_CONFIGURED",
+        errors::EXTENSION_SUPPORT_REQUIRED => "EXTENSION_SUPPORT_REQUIRED",
+        errors::VERSION_NOT_SUPPORTED => "VERSION_NOT_SUPPORTED",
+        errors::INVALID_PARAMS => "INVALID_PARAMS",
+        errors::METHOD_NOT_FOUND => "METHOD_NOT_FOUND",
+        errors::INVALID_REQUEST => "INVALID_REQUEST",
+        errors::INTERNAL_ERROR => "INTERNAL",
+        _ => "UNKNOWN",
+    }
+}
+
+fn apply_history_length(task: &mut a2a_rs_core::Task, history_length: Option<i32>) {
     crate::server::apply_history_length(task, history_length);
 }
 
@@ -138,7 +181,24 @@ pub(crate) async fn try_rest_dispatch(
 
     // GET /tasks (list)
     if *method == Method::GET && (sub == "/tasks" || sub == "/tasks/") {
-        return Some(rest_list_tasks(State(state.clone()), Query(ListTasksQuery::default())).await.into_response());
+        let mut query = ListTasksQuery::default();
+        if let Some(qs) = uri.query() {
+            for pair in qs.split('&') {
+                if let Some((key, val)) = pair.split_once('=') {
+                    match key {
+                        "contextId" => query.context_id = Some(val.to_string()),
+                        "status" => query.status = serde_json::from_value(serde_json::Value::String(val.to_string())).ok(),
+                        "pageSize" => query.page_size = val.parse().ok(),
+                        "pageToken" => query.page_token = Some(val.to_string()),
+                        "historyLength" => query.history_length = val.parse().ok(),
+                        "statusTimestampAfter" => query.status_timestamp_after = Some(val.to_string()),
+                        "includeArtifacts" => query.include_artifacts = val.parse().ok(),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        return Some(rest_list_tasks(State(state.clone()), Query(query)).await.into_response());
     }
 
     // GET /extendedAgentCard
@@ -203,7 +263,7 @@ pub(crate) async fn try_rest_dispatch(
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct GetTaskQuery {
-    history_length: Option<u32>,
+    history_length: Option<i32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -211,9 +271,9 @@ struct GetTaskQuery {
 struct ListTasksQuery {
     context_id: Option<String>,
     status: Option<a2a_rs_core::TaskState>,
-    page_size: Option<u32>,
+    page_size: Option<i32>,
     page_token: Option<String>,
-    history_length: Option<u32>,
+    history_length: Option<i32>,
     status_timestamp_after: Option<String>,
     include_artifacts: Option<bool>,
 }
@@ -300,7 +360,6 @@ async fn rest_send_message(
                                         task_id: t.id.clone(),
                                         context_id: ctx,
                                         status: t.status.clone(),
-                                        is_final: true,
                                         metadata: None,
                                     },
                                 ));
@@ -431,7 +490,7 @@ async fn rest_send_streaming_message(
 
                         let is_terminal = match &event {
                             StreamResponse::Task(t) => t.status.state.is_terminal(),
-                            StreamResponse::StatusUpdate(e) => e.is_final || e.status.state.is_terminal(),
+                            StreamResponse::StatusUpdate(e) => e.status.state.is_terminal(),
                             _ => false,
                         };
                         if is_terminal {
@@ -535,7 +594,6 @@ async fn rest_cancel_task(
                 task_id: task.id.clone(),
                 context_id: task.context_id.clone(),
                 status: task.status.clone(),
-                is_final: true,
                 metadata: None,
             }));
             match serde_json::to_value(task) {
@@ -609,7 +667,7 @@ async fn rest_subscribe_to_task(
 
                         let is_terminal = match &event {
                             StreamResponse::Task(t) => t.status.state.is_terminal(),
-                            StreamResponse::StatusUpdate(e) => e.is_final || e.status.state.is_terminal(),
+                            StreamResponse::StatusUpdate(e) => e.status.state.is_terminal(),
                             _ => false,
                         };
                         if is_terminal {

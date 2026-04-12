@@ -419,16 +419,17 @@ impl AppState {
 
 // ============ History Trimming ============
 
-pub(crate) fn apply_history_length(task: &mut Task, history_length: Option<u32>) {
+pub(crate) fn apply_history_length(task: &mut Task, history_length: Option<i32>) {
     match history_length {
-        Some(0) => {
+        Some(n) if n <= 0 => {
             task.history = None;
         }
         Some(n) => {
+            let n = n as usize;
             if let Some(ref mut history) = task.history {
                 let len = history.len();
-                if len > n as usize {
-                    *history = history.split_off(len - n as usize);
+                if len > n {
+                    *history = history.split_off(len - n);
                 }
             }
         }
@@ -843,16 +844,13 @@ async fn handle_message_send(
         );
     }
 
-    let blocking = params
-        .configuration
-        .as_ref()
-        .and_then(|c| c.blocking)
-        .unwrap_or(false);
+    // return_immediately: when explicitly false, the server waits for task
+    // completion. When absent (None) or true, return the task immediately.
     let return_immediately = params
         .configuration
         .as_ref()
         .and_then(|c| c.return_immediately)
-        .unwrap_or(false);
+        .unwrap_or(true);
     let history_length = params.configuration.as_ref().and_then(|c| c.history_length);
 
     // If the incoming message references an existing task, remember the
@@ -911,8 +909,7 @@ async fn handle_message_send(
                     // broadcasting or spawning auto-complete, so the blocking
                     // wait loop below doesn't miss the completion event.
                     state.task_store.insert(task.clone()).await;
-                    let blocking_rx = if blocking
-                        && !return_immediately
+                    let blocking_rx = if !return_immediately
                         && !task.status.state.is_terminal()
                     {
                         Some(state.subscribe_events())
@@ -949,7 +946,6 @@ async fn handle_message_send(
                                             task_id: t.id.clone(),
                                             context_id: ctx,
                                             status: t.status.clone(),
-                                            is_final: true,
                                             metadata: None,
                                         },
                                     ));
@@ -1191,7 +1187,7 @@ async fn handle_message_stream(
                         // End stream on terminal state or final flag
                         let is_terminal = match &event {
                             StreamResponse::Task(t) => t.status.state.is_terminal(),
-                            StreamResponse::StatusUpdate(e) => e.is_final || e.status.state.is_terminal(),
+                            StreamResponse::StatusUpdate(e) => e.status.state.is_terminal(),
                             _ => false,
                         };
                         if is_terminal {
@@ -1288,7 +1284,6 @@ async fn handle_tasks_cancel(
                         task_id: task.id.clone(),
                         context_id: task.context_id.clone(),
                         status: task.status.clone(),
-                        is_final: true,
                         metadata: None,
                     }));
 
@@ -1464,7 +1459,7 @@ async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Respo
 
                         let is_terminal = match &event {
                             StreamResponse::Task(t) => t.status.state.is_terminal(),
-                            StreamResponse::StatusUpdate(e) => e.is_final || e.status.state.is_terminal(),
+                            StreamResponse::StatusUpdate(e) => e.status.state.is_terminal(),
                             _ => false,
                         };
                         if is_terminal {
@@ -1563,9 +1558,16 @@ async fn handle_push_config_create(
                 );
             }
 
+            let push_config = a2a_rs_core::PushNotificationConfig {
+                id: Some(p.config_id.clone()),
+                url: p.url.clone(),
+                token: p.token.clone(),
+                authentication: p.authentication.clone(),
+            };
+
             if let Err(e) = state
                 .webhook_store
-                .set(&p.task_id, &p.config_id, p.push_notification_config.clone())
+                .set(&p.task_id, &p.config_id, push_config)
                 .await
             {
                 return (
@@ -1574,16 +1576,27 @@ async fn handle_push_config_create(
                 );
             }
 
-            (
-                StatusCode::OK,
-                Json(success(
-                    req.id,
-                    serde_json::json!({
-                        "configId": p.config_id,
-                        "config": p.push_notification_config
-                    }),
-                )),
-            )
+            let response = a2a_rs_core::TaskPushNotificationConfig {
+                tenant: p.tenant,
+                id: p.config_id,
+                task_id: p.task_id,
+                url: p.url,
+                token: p.token,
+                authentication: p.authentication,
+            };
+
+            match serde_json::to_value(response) {
+                Ok(val) => (StatusCode::OK, Json(success(req.id, val))),
+                Err(e) => (
+                    StatusCode::OK,
+                    Json(error(
+                        req.id,
+                        errors::INTERNAL_ERROR,
+                        "serialization failed",
+                        Some(serde_json::json!({"error": e.to_string()})),
+                    )),
+                ),
+            }
         }
         Err(err) => (
             StatusCode::OK,

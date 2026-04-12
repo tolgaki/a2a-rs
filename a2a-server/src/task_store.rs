@@ -131,7 +131,7 @@ impl TaskStore {
     /// Validate `ListTasksRequest` parameters, returning an error message on failure.
     pub fn validate_list_params(params: &ListTasksRequest) -> Result<(), &'static str> {
         if let Some(ps) = params.page_size {
-            if ps == 0 || ps > 100 {
+            if ps <= 0 || ps > 100 {
                 return Err("pageSize must be between 1 and 100");
             }
         }
@@ -141,11 +141,9 @@ impl TaskStore {
             }
         }
         if let Some(hl) = params.history_length {
-            // history_length is u32, but serde may accept negative JSON ints as
-            // very large u32 values. Practically, we cap at a sane maximum.
-            // The real guard is that serde rejects negative values for u32 at
-            // the deserialization layer, yielding INVALID_PARAMS.
-            let _ = hl;
+            if hl < 0 {
+                return Err("historyLength must be non-negative");
+            }
         }
         Ok(())
     }
@@ -192,8 +190,8 @@ impl TaskStore {
             .cloned()
             .collect();
 
-        let total_size = filtered.len() as u32;
-        let requested_page_size = params.page_size.unwrap_or(50).min(100) as usize;
+        let total_size = filtered.len() as i32;
+        let requested_page_size = params.page_size.unwrap_or(50).max(1).min(100) as usize;
 
         // Sort by status timestamp descending (newest first) per A2A spec.
         filtered.sort_by(|a, b| {
@@ -216,7 +214,7 @@ impl TaskStore {
             .map(|mut task| {
                 // Optionally trim/omit history
                 match params.history_length {
-                    Some(0) => {
+                    Some(n) if n <= 0 => {
                         task.history = None;
                     }
                     Some(n) => {
@@ -247,7 +245,7 @@ impl TaskStore {
 
         // pageSize in the response is the number of items actually returned
         // on this page (per A2A TCK expectations).
-        let page_size = paginated.len() as u32;
+        let page_size = paginated.len() as i32;
 
         TaskListResponse {
             tasks: paginated,

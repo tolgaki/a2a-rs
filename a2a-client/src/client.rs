@@ -542,7 +542,7 @@ impl A2aClient {
     pub async fn get_task(
         &self,
         task_id: &str,
-        history_length: Option<u32>,
+        history_length: Option<i32>,
         session_token: Option<&str>,
     ) -> Result<Task> {
         if self.config.transport == Transport::Rest {
@@ -574,6 +574,7 @@ impl A2aClient {
         let params = CancelTaskRequest {
             id: task_id.to_string(),
             tenant: None,
+            metadata: None,
         };
         self.json_rpc_call("tasks/cancel", params, session_token)
             .await
@@ -586,8 +587,39 @@ impl A2aClient {
         session_token: Option<&str>,
     ) -> Result<TaskListResponse> {
         if self.config.transport == Transport::Rest {
+            let mut params = Vec::new();
+            if let Some(ref ctx) = request.context_id {
+                params.push(format!("contextId={}", urlencoding::encode(ctx)));
+            }
+            if let Some(status) = &request.status {
+                if let Ok(s) = serde_json::to_string(status) {
+                    // Remove surrounding quotes from JSON string
+                    let s = s.trim_matches('"');
+                    params.push(format!("status={}", urlencoding::encode(s)));
+                }
+            }
+            if let Some(ps) = request.page_size {
+                params.push(format!("pageSize={}", ps));
+            }
+            if let Some(ref pt) = request.page_token {
+                params.push(format!("pageToken={}", urlencoding::encode(pt)));
+            }
+            if let Some(hl) = request.history_length {
+                params.push(format!("historyLength={}", hl));
+            }
+            if let Some(ts) = request.status_timestamp_after {
+                params.push(format!("statusTimestampAfter={}", ts));
+            }
+            if let Some(ia) = request.include_artifacts {
+                params.push(format!("includeArtifacts={}", ia));
+            }
+            let path = if params.is_empty() {
+                "/tasks".to_string()
+            } else {
+                format!("/tasks?{}", params.join("&"))
+            };
             return self
-                .rest_call(reqwest::Method::GET, "/tasks", Some(request), session_token)
+                .rest_call::<(), TaskListResponse>(reqwest::Method::GET, &path, None, session_token)
                 .await;
         }
         self.json_rpc_call("tasks/list", request, session_token)
@@ -661,7 +693,9 @@ impl A2aClient {
         let params = CreateTaskPushNotificationConfigRequest {
             task_id: task_id.to_string(),
             config_id: config_id.to_string(),
-            push_notification_config: config,
+            url: config.url,
+            token: config.token,
+            authentication: config.authentication,
             tenant: None,
         };
         self.json_rpc_call("tasks/pushNotificationConfig/create", params, session_token)
