@@ -147,7 +147,7 @@ All examples showcase the A2A v1.0 protocol via the `a2a-rs-*` crates.
 | [`multi_agent`](a2a-server/examples/multi_agent.rs) | Agent-to-agent delegation via client SDK | `cargo run --example multi_agent` |
 | [`simple_client`](a2a-client/examples/simple_client.rs) | Agent discovery and message sending | `cargo run -p a2a-rs-client --example simple_client` |
 | [`polling_client`](a2a-client/examples/polling_client.rs) | Task polling until completion | `cargo run -p a2a-rs-client --example polling_client` |
-| [`tck_server`](a2a-server/examples/tck_server.rs) | TCK conformance SUT (all scenarios) | `cargo run --example tck_server` |
+| [`tck_server`](a2a-server/examples/tck_server.rs) | *Internal:* TCK conformance SUT | `cargo run --example tck_server` |
 
 ### Streaming Agent
 

@@ -95,14 +95,8 @@ cargo run --example multi_agent
 
 ---
 
-### `tck_server` — Protocol Conformance
+## Internal Test Infrastructure
 
-A System Under Test (SUT) for the [A2A TCK](https://github.com/a2aproject/a2a-tck) conformance suite. Routes behavior based on `messageId` prefix per the TCK Gherkin scenarios.
+### `tck_server` — TCK Conformance SUT
 
-```sh
-cargo run --example tck_server
-# Then run TCK:
-# python -m pytest tests/compatibility/ --sut-host=http://localhost:8080 --transport=jsonrpc
-```
-
-**Key concept:** The TCK uses `messageId` prefixes to signal which behavior the SUT should exhibit (complete, artifact, message-only, input-required, reject, etc.).
+*Not a user-facing sample.* This is a System Under Test for the [A2A TCK](https://github.com/a2aproject/a2a-tck) conformance suite. It routes behavior based on `messageId` prefix to exercise every protocol scenario. See [tck_server.rs](tck_server.rs) for details.

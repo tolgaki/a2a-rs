@@ -1,10 +1,14 @@
-//! TCK-compliant SUT (System Under Test) for A2A protocol conformance testing.
+//! # TCK Conformance Server (internal test infrastructure)
 //!
-//! Routes behavior based on `messageId` prefix per the TCK scenario contract
-//! defined in `scenarios/core_operations.feature` and `scenarios/streaming.feature`.
+//! **This is NOT a user-facing sample.** It is a System Under Test (SUT) for the
+//! [A2A TCK](https://github.com/a2aproject/a2a-tck) conformance suite. It routes
+//! behavior based on `messageId` prefix per the TCK Gherkin scenario contracts.
 //!
-//! Run with: cargo run --example tck_server
-//! Test with: python -m pytest tests/compatibility/ --sut-host=http://localhost:8080 --transport=jsonrpc
+//! For user-facing examples, see: `echo_server`, `custom_handler`,
+//! `streaming_agent`, `push_notifications`, `multi_agent`.
+//!
+//! Run with: `cargo run --example tck_server`
+//! Test with: `python -m pytest tests/compatibility/ --sut-host=http://localhost:8080 --transport=jsonrpc`
 
 use a2a_rs_core::{
     now_iso8601, Artifact, Message, Part, Role, SendMessageResponse, Task, TaskState, TaskStatus,
