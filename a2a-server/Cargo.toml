@@ -16,7 +16,7 @@ name = "a2a_rs_server"
 path = "src/lib.rs"
 
 [dependencies]
-a2a-rs-core = { version = "1.0.24", path = "../a2a-core" }
+a2a-rs-core = { version = "1.0.25", path = "../a2a-core" }
 anyhow.workspace = true
 axum.workspace = true
 reqwest.workspace = true
@@ -35,6 +35,7 @@ tower = { workspace = true, features = ["timeout"] }
 url = "2"
 
 [dev-dependencies]
+a2a-rs-client = { path = "../a2a-client" }
 axum = { workspace = true, features = ["macros"] }
 http-body-util = "0.1"
 hyper = "1"

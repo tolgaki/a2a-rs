@@ -1,107 +1,80 @@
-# A2A Rust Libraries
+# a2a-rs — Agent-to-Agent Protocol for Rust
 
+[![crates.io](https://img.shields.io/crates/v/a2a-rs-server.svg)](https://crates.io/crates/a2a-rs-server)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
-[![A2A Protocol](https://img.shields.io/badge/A2A-RC%201.0-green.svg)](https://github.com/google/A2A)
+[![A2A Protocol](https://img.shields.io/badge/A2A-v1.0-green.svg)](https://github.com/a2aproject/A2A)
 
-Rust libraries for building **Agent-to-Agent (A2A)** applications following the [A2A RC 1.0 specification](https://github.com/google/A2A). Build interoperable AI agents that can discover, communicate, and collaborate with each other.
+Production-ready Rust SDK for the [A2A (Agent-to-Agent) v1.0 protocol](https://github.com/a2aproject/A2A). Build interoperable AI agents that discover, communicate, and collaborate across any language or framework.
 
-## What is A2A?
-
-The **Agent-to-Agent (A2A) protocol** is an open standard for machine-to-machine communication between AI agents. It enables:
-
-- **Agent Discovery** - Agents publish their capabilities via Agent Cards
-- **Standardized Messaging** - JSON-RPC 2.0 over HTTP for reliable communication
-- **Task Management** - Track asynchronous operations with state machines
-- **Security** - Built-in support for OAuth2, API keys, and mutual TLS
+**Spec compliant.** Passes the [A2A TCK](https://github.com/a2aproject/a2a-tck) conformance suite. Tested for cross-language interoperability with Python, .NET, Go, Java, JS, and Swift SDKs.
 
 ## Crates
 
-| Crate | Description |
-|-------|-------------|
-| [`a2a-rs-core`](a2a-rs-core/) | Shared A2A RC 1.0 types, JSON-RPC definitions, and utilities |
-| [`a2a-rs-server`](a2a-rs-server/) | Generic server framework with pluggable `MessageHandler` trait |
-| [`a2a-rs-client`](a2a-rs-client/) | Client library for agent discovery and message sending |
+| Crate | Purpose |
+|-------|---------|
+| [`a2a-rs-core`](https://crates.io/crates/a2a-rs-core) | A2A v1.0 types, error codes, JSON-RPC definitions |
+| [`a2a-rs-server`](https://crates.io/crates/a2a-rs-server) | Server framework — JSON-RPC + REST transports, streaming, push notifications |
+| [`a2a-rs-client`](https://crates.io/crates/a2a-rs-client) | Client library — agent discovery, messaging, task polling, OAuth PKCE |
 
 ## Quick Start
 
-### Installation
-
-Add the crates you need to your `Cargo.toml`:
-
 ```toml
+# Cargo.toml
 [dependencies]
-# For building agent servers
 a2a-rs-server = "1.0"
 a2a-rs-core = "1.0"
-
-# For building clients
-a2a-rs-client = "1.0"
-a2a-rs-core = "1.0"
-
-# Required async runtime
 tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
 ```
 
-### Build an Echo Server (5 lines)
+### Minimal Server (5 lines)
 
 ```rust
 use a2a_rs_server::A2aServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    A2aServer::echo().bind("0.0.0.0:8080").run().await
+    A2aServer::echo().bind("0.0.0.0:8080")?.run().await
 }
 ```
 
-### Build a Custom Agent
+This gives you a working A2A agent with:
+- Agent card at `GET /.well-known/agent-card.json`
+- JSON-RPC at `POST /v1/rpc` (SendMessage, GetTask, CancelTask, ListTasks, streaming)
+- REST at `GET/POST /v1/tasks/*`, `POST /v1/message:send`, `POST /v1/message:stream`
+- Health check at `GET /health`
 
-Implement the `MessageHandler` trait to create your own AI agent:
+### Custom Agent
 
 ```rust
 use a2a_rs_server::{A2aServer, MessageHandler, HandlerResult, AuthContext};
-use a2a_rs_core::{
-    AgentCard, AgentCapabilities, AgentInterface, AgentProvider, AgentSkill,
-    Message, SendMessageResponse, Part, Role, PROTOCOL_VERSION,
-    completed_task_with_text,
-};
+use a2a_rs_core::*;
 use async_trait::async_trait;
 
-struct MyAiAgent;
+struct MyAgent;
 
 #[async_trait]
-impl MessageHandler for MyAiAgent {
+impl MessageHandler for MyAgent {
     async fn handle_message(
         &self,
         message: Message,
         _auth: Option<AuthContext>,
     ) -> HandlerResult<SendMessageResponse> {
-        // Extract text from message parts
-        let user_text: String = message.parts.iter()
+        let text = message.parts.iter()
             .filter_map(|p| p.as_text())
             .collect::<Vec<_>>()
-            .join("\n");
+            .join(" ");
 
-        let response = format!("You said: {}", user_text);
         Ok(SendMessageResponse::Task(
-            completed_task_with_text(message, &response),
+            completed_task_with_text(message, &format!("You said: {text}"))
         ))
     }
 
-    fn agent_card(&self, base_url: &str) -> AgentCard {
+    fn agent_card(&self, _base_url: &str) -> AgentCard {
         AgentCard {
-            name: "My AI Agent".to_string(),
-            description: "An AI agent that does amazing things".to_string(),
-            supported_interfaces: vec![AgentInterface {
-                url: format!("{}/v1/rpc", base_url),
-                protocol_binding: "JSONRPC".to_string(),
-                protocol_version: PROTOCOL_VERSION.to_string(),
-                tenant: None,
-            }],
-            provider: Some(AgentProvider {
-                organization: "My Organization".to_string(),
-                url: "https://example.com".to_string(),
-            }),
+            name: "My Agent".to_string(),
+            description: "Does useful things".to_string(),
             version: PROTOCOL_VERSION.to_string(),
             skills: vec![AgentSkill {
                 id: "chat".to_string(),
@@ -117,14 +90,18 @@ impl MessageHandler for MyAiAgent {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    A2aServer::new(MyAiAgent)
-        .bind("0.0.0.0:8080")
-        .run()
-        .await
+    A2aServer::new(MyAgent).bind("0.0.0.0:8080")?.run().await
 }
 ```
 
-### Build a Client
+### Client
+
+```toml
+[dependencies]
+a2a-rs-client = "1.0"
+a2a-rs-core = "1.0"
+tokio = { version = "1", features = ["full"] }
+```
 
 ```rust
 use a2a_rs_client::A2aClient;
@@ -134,178 +111,134 @@ use a2a_rs_core::{Message, Part, Role, SendMessageResult};
 async fn main() -> anyhow::Result<()> {
     let client = A2aClient::with_server("http://localhost:8080")?;
 
-    // Discover the agent's capabilities
+    // Discover agent capabilities
     let card = client.fetch_agent_card().await?;
-    println!("Connected to: {}", card.name);
+    println!("Connected to: {} ({})", card.name, card.description);
 
-    // Create and send a message
-    let message = Message {
-        kind: "message".to_string(),
+    // Send a message
+    let msg = Message {
         message_id: uuid::Uuid::new_v4().to_string(),
         role: Role::User,
         parts: vec![Part::text("Hello, agent!")],
-        context_id: None,
-        task_id: None,
-        extensions: vec![],
-        reference_task_ids: None,
-        metadata: None,
+        ..Default::default()
     };
+    let result = client.send_message(msg, None, None).await?;
 
-    let response = client.send_message(message, None).await?;
-
-    match response {
-        SendMessageResult::Task(task) => {
-            println!("Task state: {:?}", task.status.state);
-            if let Some(history) = &task.history {
-                for msg in history.iter().filter(|m| m.role == Role::Agent) {
-                    for part in &msg.parts {
-                        if let Some(text) = part.as_text() {
-                            println!("Agent: {}", text);
-                        }
-                    }
-                }
-            }
-        }
+    match result {
+        SendMessageResult::Task(task) => println!("Task: {:?}", task.status.state),
         SendMessageResult::Message(msg) => {
-            for part in &msg.parts {
-                if let Some(text) = part.as_text() {
-                    println!("Agent: {}", text);
-                }
-            }
+            for p in &msg.parts { if let Some(t) = p.as_text() { println!("Agent: {t}"); } }
         }
     }
-
     Ok(())
 }
 ```
 
-## Architecture
+## Examples
 
+All examples showcase the A2A v1.0 protocol via the `a2a-rs-*` crates.
+
+| Example | What it demonstrates | Run command |
+|---------|---------------------|-------------|
+| [`echo_server`](a2a-server/examples/echo_server.rs) | Minimal agent in 5 lines | `cargo run --example echo_server` |
+| [`custom_handler`](a2a-server/examples/custom_handler.rs) | Skills, artifacts, agent card, routing | `cargo run --example custom_handler` |
+| [`streaming_agent`](a2a-server/examples/streaming_agent.rs) | SSE streaming with incremental artifacts | `cargo run --example streaming_agent` |
+| [`push_notifications`](a2a-server/examples/push_notifications.rs) | Webhook push notifications with receiver | `cargo run --example push_notifications` |
+| [`multi_agent`](a2a-server/examples/multi_agent.rs) | Agent-to-agent delegation via client SDK | `cargo run --example multi_agent` |
+| [`simple_client`](a2a-client/examples/simple_client.rs) | Agent discovery and message sending | `cargo run -p a2a-rs-client --example simple_client` |
+| [`polling_client`](a2a-client/examples/polling_client.rs) | Task polling until completion | `cargo run -p a2a-rs-client --example polling_client` |
+| [`tck_server`](a2a-server/examples/tck_server.rs) | TCK conformance SUT (all scenarios) | `cargo run --example tck_server` |
+
+### Streaming Agent
+
+The streaming example shows the full A2A SSE lifecycle: Working task, artifact chunks streamed word-by-word, then Completed.
+
+```sh
+# Terminal 1: Start the agent
+cargo run --example streaming_agent
+
+# Terminal 2: Stream via JSON-RPC
+curl -N -X POST http://localhost:8080/v1/rpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage",
+       "params":{"message":{"messageId":"s1","role":"ROLE_USER",
+       "parts":[{"text":"Tell me a story"}]}}}'
+
+# Or via REST
+curl -N -X POST http://localhost:8080/v1/message:stream \
+  -H "Content-Type: application/json" \
+  -d '{"message":{"messageId":"s2","role":"ROLE_USER",
+       "parts":[{"text":"Count to five"}]}}'
 ```
-+---------------------------------------------------------------+
-|                        Your Application                        |
-+---------------------------------------------------------------+
-                    |                           |
-                    v                           v
-+-----------------------------+   +-----------------------------+
-|        a2a-rs-client           |   |        a2a-rs-server           |
-|  - Agent discovery          |   |  - MessageHandler trait     |
-|  - Message sending          |   |  - A2aServer builder        |
-|  - Task polling             |   |  - TaskStore                |
-|  - OAuth PKCE support       |   |  - Auth extractors          |
-+-----------------------------+   +-----------------------------+
-                    |                           |
-                    +-------------+-------------+
-                                  v
-                    +-----------------------------+
-                    |         a2a-rs-core            |
-                    |  - A2A RC 1.0 types         |
-                    |  - Security schemes         |
-                    |  - JSON-RPC definitions     |
-                    |  - Helper functions         |
-                    +-----------------------------+
+
+### Push Notifications
+
+The push notification example runs a webhook receiver alongside the agent, demonstrating the full webhook lifecycle.
+
+```sh
+cargo run --example push_notifications
+
+# The example starts both the agent (port 8080) and a webhook receiver (port 9090),
+# then demonstrates: create config -> send message -> receive webhook -> cleanup
 ```
 
-## Core Concepts
+### Multi-Agent Delegation
 
-### Agent Card
+Two agents collaborate: a Coordinator delegates work to a Worker.
 
-Every A2A agent publishes an **Agent Card** that describes its capabilities:
+```sh
+cargo run --example multi_agent
+
+# Worker agent starts on port 3002
+# Coordinator starts on port 3001 and uses a2a-rs-client to call the Worker
+```
+
+## Transport Bindings
+
+The server exposes both A2A v1.0 transport bindings simultaneously:
+
+### JSON-RPC (default at `/v1/rpc`)
+
+| Method | Description |
+|--------|-------------|
+| `SendMessage` | Send a message, get Task or Message back |
+| `SendStreamingMessage` | SSE streaming response |
+| `GetTask` | Retrieve task by ID |
+| `ListTasks` | List/filter/paginate tasks |
+| `CancelTask` | Cancel a running task |
+| `SubscribeToTask` | SSE subscription to task updates |
+| `GetExtendedAgentCard` | Authenticated extended card |
+| `Create/Get/List/DeleteTaskPushNotificationConfig` | Push notification CRUD |
+
+### REST / HTTP+JSON (default at `/v1`)
+
+| Verb + Path | Operation |
+|-------------|-----------|
+| `POST /v1/message:send` | SendMessage |
+| `POST /v1/message:stream` | SendStreamingMessage (SSE) |
+| `GET /v1/tasks` | ListTasks (query params) |
+| `GET /v1/tasks/{id}` | GetTask |
+| `POST /v1/tasks/{id}:cancel` | CancelTask |
+| `GET /v1/tasks/{id}:subscribe` | SubscribeToTask (SSE) |
+| `GET /v1/extendedAgentCard` | GetExtendedAgentCard |
+| `POST/GET/DELETE /v1/tasks/{id}/pushNotificationConfigs[/{configId}]` | Push config CRUD |
+
+Error responses use [AIP-193](https://google.aip.dev/193) format with `google.rpc.ErrorInfo` details.
+
+## Server Configuration
 
 ```rust
-use a2a_rs_core::{AgentCard, AgentInterface, AgentCapabilities, PROTOCOL_VERSION};
+use a2a_rs_server::A2aServer;
 
-// Agents expose their card at /.well-known/agent-card.json
-let card = AgentCard {
-    name: "Weather Agent".to_string(),
-    description: "Get weather forecasts for any location".to_string(),
-    supported_interfaces: vec![AgentInterface {
-        url: "https://api.example.com/v1/rpc".to_string(),
-        protocol_binding: "JSONRPC".to_string(),
-        protocol_version: PROTOCOL_VERSION.to_string(),
-        tenant: None,
-    }],
-    version: PROTOCOL_VERSION.to_string(),
-    ..Default::default()
-};
-```
-
-### Messages and Parts
-
-Messages contain multimodal content via **Part** variants, each tagged with a `kind` discriminator:
-
-```rust
-use a2a_rs_core::{Message, Part, Role};
-
-// Text message
-let msg = Message {
-    kind: "message".to_string(),
-    message_id: "msg-1".to_string(),
-    role: Role::User,
-    parts: vec![Part::text("Analyze this document")],
-    context_id: Some("conversation-123".to_string()),
-    task_id: None,
-    extensions: vec![],
-    reference_task_ids: None,
-    metadata: None,
-};
-
-// File URI part
-let file_part = Part::file_uri("https://example.com/doc.pdf", "application/pdf");
-
-// Structured data part
-let data_part = Part::data(
-    serde_json::json!({"location": "New York", "units": "celsius"}),
-);
-
-// File bytes part (base64-encoded)
-let bytes_part = Part::file_bytes("iVBORw0KGgoAAAANS...", "image/png");
-
-// Extract text from a part
-if let Some(text) = msg.parts[0].as_text() {
-    println!("{}", text);
-}
-```
-
-### Tasks and States
-
-Tasks track the lifecycle of agent operations:
-
-```rust
-use a2a_rs_core::{Task, TaskState, TaskStatus};
-
-// Task states follow this lifecycle:
-//
-//   SUBMITTED -> WORKING -> COMPLETED
-//                       \-> FAILED
-//                       \-> CANCELED
-//                       \-> INPUT_REQUIRED -> WORKING -> ...
-
-// Check if task is done
-if task.status.state.is_terminal() {
-    println!("Task finished with state: {:?}", task.status.state);
-}
-```
-
-## Server Features
-
-### Authentication
-
-Add authentication to your server:
-
-```rust
-use a2a_rs_server::{A2aServer, AuthContext};
-use axum::http::HeaderMap;
-
-A2aServer::new(my_handler)
-    .bind("0.0.0.0:8080")
-    .auth_extractor(|headers: &HeaderMap| {
-        let auth_header = headers.get("authorization")?.to_str().ok()?;
-        let token = auth_header.strip_prefix("Bearer ")?;
-
-        Some(AuthContext {
-            user_id: "user-123".to_string(),
-            access_token: token.to_string(),
+A2aServer::new(handler)
+    .bind("0.0.0.0:8080")?          // Listen address
+    .rpc_path("/v1/rpc")             // JSON-RPC endpoint path
+    .rest_prefix(Some("/v1"))        // REST prefix (None to disable)
+    .auth_extractor(|headers| {      // Extract auth from requests
+        let token = headers.get("authorization")?.to_str().ok()?;
+        Some(a2a_rs_server::AuthContext {
+            user_id: "user".into(),
+            access_token: token.into(),
             metadata: None,
         })
     })
@@ -313,342 +246,73 @@ A2aServer::new(my_handler)
     .await?;
 ```
 
-### Custom Routes
+## Data Model
 
-Add additional HTTP endpoints:
-
-```rust
-use a2a_rs_server::{A2aServer, AppState};
-use axum::{Router, routing::get, Json};
-
-async fn custom_health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"custom": "health"}))
-}
-
-let custom_routes = Router::new()
-    .route("/custom/health", get(custom_health));
-
-A2aServer::new(my_handler)
-    .additional_routes(custom_routes)
-    .run()
-    .await?;
-```
-
-## Client Features
-
-### Agent Card Caching
-
-Agent cards are automatically cached for 5 minutes:
+### Parts (multimodal content)
 
 ```rust
-let client = A2aClient::with_server("http://localhost:8080")?;
+use a2a_rs_core::Part;
 
-let card = client.fetch_agent_card().await?;         // Fetches from server
-let card = client.fetch_agent_card().await?;         // Uses cache
-client.invalidate_card_cache().await;                // Force refresh
-let card = client.fetch_agent_card().await?;         // Fetches fresh
+// Text
+let text = Part::text("Hello");
+
+// File by URL (with filename)
+let file = Part::file_uri_named("https://example.com/doc.pdf", "application/pdf", "doc.pdf");
+
+// File by bytes (base64)
+let bytes = Part::file_bytes_named("iVBORw0KGgo...", "image/png", "chart.png");
+
+// Structured data
+let data = Part::data(serde_json::json!({"temperature": 72, "unit": "F"}));
 ```
 
-### Configurable Polling
+### Task States
 
-```rust
-use a2a_rs_client::{A2aClient, ClientConfig};
-
-let config = ClientConfig {
-    server_url: "http://localhost:8080".to_string(),
-    max_polls: 60,          // Maximum poll attempts
-    poll_interval_ms: 1000, // 1 second between polls
-    oauth: None,
-};
-
-let client = A2aClient::new(config)?;
-let task = client.poll_until_complete("task-id", None).await?;
+```
+SUBMITTED -> WORKING -> COMPLETED
+                    \-> FAILED
+                    \-> CANCELED
+                    \-> INPUT_REQUIRED -> WORKING -> ...
+                    \-> REJECTED
+                    \-> AUTH_REQUIRED
 ```
 
-### OAuth PKCE Support
+### Error Codes
 
-```rust
-use a2a_rs_client::{A2aClient, ClientConfig, OAuthConfig};
+| Code | Name | HTTP Status |
+|------|------|-------------|
+| -32001 | TaskNotFound | 404 |
+| -32002 | TaskNotCancelable | 409 |
+| -32003 | PushNotificationNotSupported | 400 |
+| -32004 | UnsupportedOperation | 400 |
+| -32005 | ContentTypeNotSupported | 415 |
+| -32006 | InvalidAgentResponse | 502 |
+| -32007 | ExtendedAgentCardNotConfigured | 400 |
+| -32008 | ExtensionSupportRequired | 400 |
+| -32009 | VersionNotSupported | 400 |
 
-let config = ClientConfig {
-    server_url: "http://localhost:8080".to_string(),
-    oauth: Some(OAuthConfig {
-        client_id: "my-app".to_string(),
-        redirect_uri: "http://localhost:3000/callback".to_string(),
-        scopes: vec!["read".to_string(), "write".to_string()],
-        session_token: None,
-    }),
-    ..Default::default()
-};
+## Wire Format
 
-let client = A2aClient::new(config)?;
-let token = client.perform_oauth_interactive().await?;
+The SDK produces spec-compliant JSON. Parts are flat per the proto definition:
 
-// Or programmatic flow
-let (auth_url, code_verifier) = client.start_oauth_flow().await?;
+```json
+{"text": "Hello"}
+{"url": "https://example.com/file.pdf", "filename": "file.pdf", "mediaType": "application/pdf"}
+{"raw": "iVBORw0KGgo...", "filename": "image.png", "mediaType": "image/png"}
+{"data": {"key": "value"}}
 ```
 
-### Streaming
-
-Use `send_message_streaming()` to receive real-time updates via Server-Sent Events:
-
-```rust
-use a2a_rs_client::A2aClient;
-use a2a_rs_core::{Message, Part, Role, StreamingMessageResult};
-use tokio_stream::StreamExt;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let client = A2aClient::with_server("http://localhost:8080")?;
-
-    let message = Message {
-        kind: "message".to_string(),
-        message_id: uuid::Uuid::new_v4().to_string(),
-        role: Role::User,
-        parts: vec![Part::text("Tell me a story")],
-        context_id: None,
-        task_id: None,
-        extensions: vec![],
-        reference_task_ids: None,
-        metadata: None,
-    };
-
-    let mut stream = client.send_message_streaming(message, None).await?;
-
-    while let Some(event) = stream.next().await {
-        match event? {
-            StreamingMessageResult::StatusUpdate(update) => {
-                println!("Status: {:?}", update.status.state);
-                if update.is_final {
-                    break;
-                }
-            }
-            StreamingMessageResult::ArtifactUpdate(artifact) => {
-                for part in &artifact.artifact.parts {
-                    if let Some(text) = part.as_text() {
-                        print!("{}", text);
-                    }
-                }
-            }
-            StreamingMessageResult::Task(task) => {
-                println!("Task {} state: {:?}", task.id, task.status.state);
-            }
-            StreamingMessageResult::Message(msg) => {
-                for part in &msg.parts {
-                    if let Some(text) = part.as_text() {
-                        println!("Agent: {}", text);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-```
-
-#### Server-side streaming
-
-Enable streaming in your agent card and push updates via the event broadcaster:
-
-```rust
-use a2a_rs_server::A2aServer;
-use a2a_rs_core::{
-    AgentCapabilities, StreamResponse, TaskStatusUpdateEvent, TaskStatus, TaskState,
-};
-
-// Enable streaming in capabilities
-let capabilities = AgentCapabilities {
-    streaming: Some(true),
-    ..Default::default()
-};
-
-// After creating the server, get the event sender for pushing updates
-let server = A2aServer::new(my_handler);
-let event_tx = server.get_event_sender();
-
-// From background processing, push status updates:
-event_tx.send(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
-    kind: "status-update".to_string(),
-    task_id: "task-123".to_string(),
-    context_id: "ctx-456".to_string(),
-    status: TaskStatus {
-        state: TaskState::Working,
-        message: None,
-        timestamp: None,
-    },
-    is_final: false,
-    metadata: None,
-})).ok();
-
-// Send final event when done:
-event_tx.send(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
-    kind: "status-update".to_string(),
-    task_id: "task-123".to_string(),
-    context_id: "ctx-456".to_string(),
-    status: TaskStatus {
-        state: TaskState::Completed,
-        message: None,
-        timestamp: None,
-    },
-    is_final: true,
-    metadata: None,
-})).ok();
-```
-
-The server handles `message/stream` requests on the same `/v1/rpc` endpoint. Each SSE
-event's `data:` field contains a full JSON-RPC response envelope wrapping the result.
-The stream ends when a `TaskStatusUpdateEvent` with `final: true` is sent or the task
-reaches a terminal state.
-
-## JSON-RPC Methods
-
-The A2A protocol defines these JSON-RPC methods:
-
-| Method | Description |
-|--------|-------------|
-| `message/send` | Send a message to the agent |
-| `message/stream` | Send with SSE streaming response |
-| `tasks/get` | Query a task by ID |
-| `tasks/cancel` | Cancel a running task |
-| `tasks/list` | List tasks |
-| `tasks/subscribe` | Subscribe to task updates |
-| `agentCard/getExtended` | Get extended agent card |
-
-### Example: Raw JSON-RPC
-
-```bash
-# Discover agent
-curl http://localhost:8080/.well-known/agent-card.json
-
-# Send message
-curl -X POST http://localhost:8080/v1/rpc \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "message/send",
-    "params": {
-      "message": {
-        "messageId": "msg-1",
-        "role": "user",
-        "parts": [{"kind": "text", "text": "Hello!"}]
-      }
-    }
-  }'
-
-# Get task status
-curl -X POST http://localhost:8080/v1/rpc \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 2,
-    "method": "tasks/get",
-    "params": {"id": "abc-123"}
-  }'
-```
-
-## Error Handling
-
-### JSON-RPC Error Codes
-
-```rust
-use a2a_rs_core::errors;
-
-// Standard JSON-RPC errors
-errors::PARSE_ERROR;        // -32700
-errors::INVALID_REQUEST;    // -32600
-errors::METHOD_NOT_FOUND;   // -32601
-errors::INVALID_PARAMS;     // -32602
-errors::INTERNAL_ERROR;     // -32603
-
-// A2A-specific errors
-errors::TASK_NOT_FOUND;                 // -32001
-errors::TASK_NOT_CANCELABLE;            // -32002
-errors::UNSUPPORTED_OPERATION;          // -32004
-errors::VERSION_NOT_SUPPORTED;          // -32007
-errors::EXTENSION_SUPPORT_REQUIRED;     // -32009
-```
-
-## Security Schemes
-
-The A2A protocol supports multiple authentication methods:
-
-```rust
-use a2a_rs_core::{
-    SecurityScheme, ApiKeySecurityScheme, HttpAuthSecurityScheme,
-    OAuth2SecurityScheme, MutualTlsSecurityScheme,
-    OAuthFlows, AuthorizationCodeOAuthFlow,
-};
-use std::collections::HashMap;
-
-// API Key authentication
-let api_key = SecurityScheme::ApiKeySecurityScheme(ApiKeySecurityScheme {
-    name: "X-API-Key".to_string(),
-    location: "header".to_string(),
-    description: None,
-});
-
-// Bearer token
-let bearer = SecurityScheme::HttpAuthSecurityScheme(HttpAuthSecurityScheme {
-    scheme: "bearer".to_string(),
-    bearer_format: Some("JWT".to_string()),
-    description: None,
-});
-
-// OAuth 2.0
-let oauth = SecurityScheme::Oauth2SecurityScheme(OAuth2SecurityScheme {
-    flows: OAuthFlows::AuthorizationCode(AuthorizationCodeOAuthFlow {
-        authorization_url: "https://auth.example.com/authorize".to_string(),
-        token_url: "https://auth.example.com/token".to_string(),
-        refresh_url: None,
-        scopes: HashMap::from([
-            ("read".to_string(), "Read access".to_string()),
-        ]),
-        pkce_required: Some(true),
-    }),
-    description: None,
-    oauth2_metadata_url: None,
-});
-
-// Mutual TLS
-let mtls = SecurityScheme::MtlsSecurityScheme(MutualTlsSecurityScheme {
-    description: Some("Client certificate required".to_string()),
-});
-```
-
-## Documentation
-
-- [Architecture Guide](docs/architecture.md) - Detailed crate structure and data flows
-- [Getting Started](docs/getting-started.md) - Step-by-step tutorial
-- [A2A Specification](https://github.com/google/A2A) - Official protocol spec
+Roles use proto-prefix style: `"ROLE_USER"`, `"ROLE_AGENT"`.
+Task states use proto-prefix style: `"TASK_STATE_WORKING"`, `"TASK_STATE_COMPLETED"`, etc.
+Timestamps use ISO 8601 with Z suffix: `"2024-01-01T00:00:00.000Z"`.
 
 ## Requirements
 
-- Rust 1.75 or later
+- Rust 1.75+
 - Tokio async runtime
-
-## Dependencies
-
-These libraries use minimal, well-maintained dependencies:
-
-| Dependency | Purpose |
-|------------|---------|
-| `serde` | JSON serialization |
-| `tokio` | Async runtime |
-| `axum` | HTTP server (a2a-rs-server) |
-| `reqwest` | HTTP client (a2a-rs-client) |
-| `uuid` | UUID generation |
-| `async-trait` | Async trait support |
-
-## Contributing
-
-Contributions are welcome! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+Apache License 2.0. See [LICENSE](LICENSE).
 
-## Acknowledgments
-
-This implementation follows the [A2A Protocol Specification](https://github.com/google/A2A) developed by Google.
+Built on the [A2A Protocol](https://github.com/a2aproject/A2A) specification.
