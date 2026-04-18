@@ -259,12 +259,17 @@ impl A2aClient {
             }
         }
 
-        // Fetch agent card and cache the endpoint
+        // Fetch agent card and pick the endpoint matching the configured transport
         let card = self.fetch_agent_card().await?;
-        let endpoint = card
-            .endpoint()
-            .ok_or_else(|| anyhow!("Agent card has no JSONRPC endpoint"))?
-            .to_string();
+        let endpoint = match self.config.transport {
+            Transport::JsonRpc => card.endpoint().ok_or_else(|| {
+                anyhow!("Agent card does not advertise a JSONRPC endpoint")
+            })?,
+            Transport::Rest => card.rest_endpoint().ok_or_else(|| {
+                anyhow!("Agent card does not advertise an HTTP+JSON (REST) endpoint")
+            })?,
+        }
+        .to_string();
 
         {
             let mut cache = self.endpoint_cache.write().await;

@@ -122,9 +122,20 @@ pub struct AgentCard {
 impl AgentCard {
     /// Get the primary JSON-RPC endpoint URL from supported interfaces
     pub fn endpoint(&self) -> Option<&str> {
+        self.endpoint_for("jsonrpc")
+    }
+
+    /// Get the primary HTTP+JSON (REST) endpoint URL from supported interfaces
+    pub fn rest_endpoint(&self) -> Option<&str> {
+        self.endpoint_for("http+json")
+    }
+
+    /// Get the first endpoint URL matching the given protocol binding name
+    /// (case-insensitive). Example bindings: `"jsonrpc"`, `"http+json"`.
+    pub fn endpoint_for(&self, binding: &str) -> Option<&str> {
         self.supported_interfaces
             .iter()
-            .find(|i| i.protocol_binding.eq_ignore_ascii_case("jsonrpc"))
+            .find(|i| i.protocol_binding.eq_ignore_ascii_case(binding))
             .map(|i| i.url.as_str())
     }
 }
@@ -1532,6 +1543,49 @@ mod tests {
         // v0.3 kind-discriminated format (backward compat)
         let text_v03: Part = serde_json::from_str(r#"{"kind":"text","text":"hello v03"}"#).unwrap();
         assert_eq!(text_v03.as_text(), Some("hello v03"));
+    }
+
+    #[test]
+    fn agent_card_endpoint_for_transport() {
+        let card = AgentCard {
+            name: "Dual".into(),
+            description: "both bindings".into(),
+            version: PROTOCOL_VERSION.to_string(),
+            supported_interfaces: vec![
+                AgentInterface {
+                    url: "https://example.com/v1/rpc".into(),
+                    protocol_binding: "JSONRPC".into(),
+                    protocol_version: PROTOCOL_VERSION.into(),
+                    tenant: None,
+                },
+                AgentInterface {
+                    url: "https://example.com/v1".into(),
+                    protocol_binding: "HTTP+JSON".into(),
+                    protocol_version: PROTOCOL_VERSION.into(),
+                    tenant: None,
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(card.endpoint(), Some("https://example.com/v1/rpc"));
+        assert_eq!(card.rest_endpoint(), Some("https://example.com/v1"));
+        assert_eq!(card.endpoint_for("http+json"), Some("https://example.com/v1"));
+        assert_eq!(card.endpoint_for("grpc"), None);
+
+        let jsonrpc_only = AgentCard {
+            name: "Single".into(),
+            description: "rpc only".into(),
+            version: PROTOCOL_VERSION.to_string(),
+            supported_interfaces: vec![AgentInterface {
+                url: "https://example.com/".into(),
+                protocol_binding: "jsonrpc".into(),
+                protocol_version: PROTOCOL_VERSION.into(),
+                tenant: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(jsonrpc_only.endpoint(), Some("https://example.com/"));
+        assert_eq!(jsonrpc_only.rest_endpoint(), None);
     }
 
     #[test]

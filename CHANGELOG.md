@@ -18,6 +18,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.26] - 2026-04-18
+
+### Added
+
+#### a2a-rs-core
+- `AgentCard::rest_endpoint()` — returns the HTTP+JSON interface URL from the agent card
+- `AgentCard::endpoint_for(binding)` — generic, case-insensitive lookup for any protocol binding
+
+#### a2a-cli (workspace-only, `publish = false`)
+- New sample CLI built on `a2a-rs-client`: `card`, `send`, `stream`, `task {get,list,cancel,subscribe}`, `push add`, and a `smoke` subcommand that runs a JSON-RPC + REST endpoint matrix against a running server
+- Global flags: `--base-url`, `--binding jsonrpc|rest`, `--bearer-token`, repeatable `--header NAME:VALUE`, `--json`, `-v`/`-vv`
+
+### Fixed
+
+#### a2a-rs-client
+- REST transport (`Transport::Rest`) now selects the HTTP+JSON endpoint from the agent card instead of falling back to the JSON-RPC URL. Previously, REST requests were sent to the JSON-RPC endpoint and parsed as JSON-RPC by the server, producing a confusing `unknown variant "jsonrpc"` decode error. A clean error is now returned when the card does not advertise an HTTP+JSON interface.
+
+---
+
 ## [1.0.4] - 2026-03-21
 
 ### Added
