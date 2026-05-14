@@ -36,7 +36,7 @@ use futures::future::FutureExt;
 use tokio::sync::broadcast;
 use tracing::info;
 
-use crate::handler::{AuthContext, BoxedHandler, EchoHandler, HandlerError};
+use crate::handler::{AuthContext, BoxedHandler, EchoHandler, HandlerContext, HandlerError};
 use crate::task_store::TaskStore;
 use crate::webhook_delivery::WebhookDelivery;
 use crate::webhook_store::WebhookStore;
@@ -888,9 +888,14 @@ async fn handle_message_send(
         }
     }
 
+    let handler_ctx = HandlerContext {
+        event_tx: state.event_tx.clone(),
+        task_store: state.task_store.clone(),
+    };
+
     match state
         .handler
-        .handle_message(params.message, auth_context)
+        .handle_message_with_context(params.message, auth_context, &handler_ctx)
         .await
     {
         Ok(response) => {
@@ -1087,9 +1092,14 @@ async fn handle_message_stream(
 
     let continue_task_id = params.message.task_id.clone();
 
+    let handler_ctx = HandlerContext {
+        event_tx: state.event_tx.clone(),
+        task_store: state.task_store.clone(),
+    };
+
     let response = match state
         .handler
-        .handle_message(params.message, auth_context)
+        .handle_message_with_context(params.message, auth_context, &handler_ctx)
         .await
     {
         Ok(r) => r,

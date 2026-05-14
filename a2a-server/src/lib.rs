@@ -62,7 +62,8 @@ mod webhook_store;
 
 // Re-export handler types
 pub use handler::{
-    AuthContext, BoxedHandler, EchoHandler, HandlerError, HandlerResult, MessageHandler,
+    AuthContext, BoxedHandler, EchoHandler, HandlerContext, HandlerError, HandlerResult,
+    MessageHandler,
 };
 
 // Re-export server types
