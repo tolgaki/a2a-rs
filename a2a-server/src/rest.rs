@@ -614,11 +614,23 @@ async fn rest_subscribe_to_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
+    // Subscribe BEFORE taking the snapshot so events emitted between the
+    // store read and the subscription are not lost. The new
+    // [subscribe, snapshot] window can deliver a duplicate (an update
+    // appearing both in the snapshot and on `rx`), but A2A updates are
+    // idempotent state edits — applying the same StatusUpdate or
+    // ArtifactUpdate (keyed by artifact_id) twice yields the same end
+    // state. Idempotent duplicate vs. silent loss is the right trade.
+    let mut rx = state.subscribe_events();
+
     let task = match state.task_store().get_flexible(&id).await {
         Some(t) => t,
         None => return aip_error(StatusCode::NOT_FOUND, "task not found").into_response(),
     };
 
+    // Re-check terminal AFTER the snapshot: the task may have transitioned
+    // to a terminal state between subscribe and snapshot. Returning early
+    // here matches the documented behavior of `:subscribe` on terminal tasks.
     if task.status.state.is_terminal() {
         return aip_error(
             StatusCode::BAD_REQUEST,
@@ -628,7 +640,6 @@ async fn rest_subscribe_to_task(
     }
 
     let target_task_id = task.id.clone();
-    let mut rx = state.subscribe_events();
     let task_store = state.task_store().clone();
 
     let stream = async_stream::stream! {
