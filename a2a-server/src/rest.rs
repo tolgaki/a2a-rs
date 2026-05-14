@@ -33,7 +33,7 @@ use a2a_rs_core::{
     TaskState, TaskStatusUpdateEvent,
 };
 
-use crate::handler::AuthContext;
+use crate::handler::{AuthContext, HandlerContext};
 use crate::server::AppState;
 use crate::task_store::TaskStore;
 
@@ -319,9 +319,14 @@ async fn rest_send_message(
         }
     }
 
+    let handler_ctx = HandlerContext {
+        event_tx: state.event_sender().clone(),
+        task_store: state.task_store().clone(),
+    };
+
     match state
         .handler_ref()
-        .handle_message(params.message, auth)
+        .handle_message_with_context(params.message, auth, &handler_ctx)
         .await
     {
         Ok(response) => match response {
@@ -408,9 +413,14 @@ async fn rest_send_streaming_message(
 
     let continue_task_id = params.message.task_id.clone();
 
+    let handler_ctx = HandlerContext {
+        event_tx: state.event_sender().clone(),
+        task_store: state.task_store().clone(),
+    };
+
     let response = match state
         .handler_ref()
-        .handle_message(params.message, auth)
+        .handle_message_with_context(params.message, auth, &handler_ctx)
         .await
     {
         Ok(r) => r,

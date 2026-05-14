@@ -2,8 +2,10 @@
 //!
 //! This example shows the canonical pattern for building a streaming A2A agent:
 //!
-//! 1. The `MessageHandler::handle_message` returns a `Task` in `Working` state immediately.
-//! 2. A background `tokio::spawn` task sends incremental updates via the broadcast channel:
+//! 1. The handler returns a `Task` in `Working` state immediately from
+//!    `handle_message_with_context`.
+//! 2. A background `tokio::spawn` task sends incremental updates via the
+//!    broadcast channel supplied in `HandlerContext`:
 //!    - `StreamResponse::StatusUpdate` — progress messages while working
 //!    - `StreamResponse::ArtifactUpdate` — artifact chunks (e.g. paragraphs of generated text)
 //!    - `StreamResponse::StatusUpdate` with terminal state — signals completion
@@ -13,7 +15,7 @@
 //! # How SSE streaming works in A2A v1.0
 //!
 //! When a client calls `SendStreamingMessage` (or `message/stream`), the server:
-//! - Calls `handle_message` to get the initial Task
+//! - Calls `handle_message_with_context` to get the initial Task
 //! - Opens an SSE stream and yields the initial Task as the first event
 //! - Listens on the broadcast channel for events matching the task ID
 //! - Yields each matching `StatusUpdate` or `ArtifactUpdate` as an SSE event
@@ -32,16 +34,10 @@
 //! - `StreamResponse::ArtifactUpdate(TaskArtifactUpdateEvent)` — artifact content chunk
 //! - `StreamResponse::Message(Message)` — direct message (less common in streaming)
 //!
-//! # Key pattern: getting the event sender
+//! # Getting the event sender
 //!
-//! The handler needs the server's broadcast channel to send streaming events, but
-//! the server is constructed with the handler. This example solves the chicken-and-egg
-//! problem using `OnceLock` behind an `Arc`:
-//!
-//! 1. Create the handler with an empty event sender slot (`Arc<OnceLock<...>>`)
-//! 2. Clone the `Arc` before moving the handler into the server
-//! 3. After server construction, call `get_event_sender()` and fill the slot
-//! 4. Call `run()` — the handler can now send events on the server's channel
+//! The server passes a `HandlerContext` into `handle_message_with_context`,
+//! which contains the broadcast `event_tx` and `task_store` to allow handlers clone these for future usage.
 //!
 //! # Running
 //!
@@ -90,7 +86,6 @@
 //! You will see a sequence of SSE events: initial task (Working), status updates with
 //! progress messages, artifact chunks with text content, and a final Completed status.
 
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use a2a_rs_core::{
@@ -98,32 +93,9 @@ use a2a_rs_core::{
     Message, Part, Role, SendMessageResponse, StreamResponse, Task, TaskArtifactUpdateEvent,
     TaskState, TaskStatus, TaskStatusUpdateEvent, PROTOCOL_VERSION,
 };
-use a2a_rs_server::{A2aServer, AuthContext, HandlerResult, MessageHandler};
+use a2a_rs_server::{A2aServer, AuthContext, HandlerContext, HandlerResult, MessageHandler};
 use async_trait::async_trait;
-use tokio::sync::broadcast;
 use uuid::Uuid;
-
-// ---------------------------------------------------------------------------
-// Shared event sender handle
-// ---------------------------------------------------------------------------
-
-/// A shared handle for the broadcast sender that can be initialized after
-/// server construction. The `Arc<OnceLock<...>>` is cloned between `main`
-/// and the handler so both reference the same slot.
-type EventSenderSlot = Arc<OnceLock<broadcast::Sender<StreamResponse>>>;
-
-/// Initialize the shared event sender slot.
-fn init_event_sender(slot: &EventSenderSlot, tx: broadcast::Sender<StreamResponse>) {
-    slot.set(tx)
-        .expect("event sender already initialized");
-}
-
-/// Get a clone of the event sender from the shared slot.
-fn get_event_sender(slot: &EventSenderSlot) -> broadcast::Sender<StreamResponse> {
-    slot.get()
-        .expect("event sender not initialized — call init_event_sender before handling requests")
-        .clone()
-}
 
 // ---------------------------------------------------------------------------
 // Streaming agent handler
@@ -133,19 +105,17 @@ fn get_event_sender(slot: &EventSenderSlot) -> broadcast::Sender<StreamResponse>
 ///
 /// The handler returns a Working task immediately and spawns a background
 /// task that emits progress updates and artifact chunks via the broadcast
-/// channel. The server's SSE plumbing delivers these to connected clients.
-struct StreamingAgent {
-    /// Shared slot for the broadcast sender. Initialized after server
-    /// construction in `main`, before `run()` is called.
-    event_tx: EventSenderSlot,
-}
+/// channel from `HandlerContext`. The server's SSE plumbing delivers these
+/// to connected clients.
+struct StreamingAgent;
 
 #[async_trait]
 impl MessageHandler for StreamingAgent {
-    async fn handle_message(
+    async fn handle_message_with_context(
         &self,
         message: Message,
         _auth: Option<AuthContext>,
+        ctx: &HandlerContext,
     ) -> HandlerResult<SendMessageResponse> {
         // Extract the user's text input
         let user_text = message
@@ -186,14 +156,14 @@ impl MessageHandler for StreamingAgent {
             metadata: None,
         };
 
-        // Get a clone of the broadcast sender for the background task
-        let event_tx = get_event_sender(&self.event_tx);
+        // Clone the broadcast sender out of the context for the background task.
+        let event_tx = ctx.event_tx.clone();
         let task_id_bg = task_id.clone();
         let context_id_bg = context_id.clone();
 
         // Spawn a background task that sends incremental updates.
-        // This is the key pattern: handle_message returns immediately,
-        // the background task drives the streaming lifecycle.
+        // `handle_message_with_context` returns immediately, the background
+        // task drives the streaming lifecycle.
         tokio::spawn(async move {
             // Simulate processing delay
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -355,23 +325,7 @@ impl MessageHandler for StreamingAgent {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    // Step 1: Create a shared slot for the event sender.
-    let event_sender_slot: EventSenderSlot = Arc::new(OnceLock::new());
-
-    // Step 2: Create the handler, giving it a clone of the shared slot.
-    let agent = StreamingAgent {
-        event_tx: event_sender_slot.clone(),
-    };
-
-    // Step 3: Build the server. This creates the internal broadcast channel.
-    // The handler is moved into the server here, but it shares the OnceLock
-    // via the Arc we cloned above.
-    let server = A2aServer::new(agent).bind("127.0.0.1:3000")?;
-
-    // Step 4: Extract the event sender from the server's broadcast channel
-    // and store it in the shared slot. The handler (now inside the server)
-    // will read from this same slot when processing requests.
-    init_event_sender(&event_sender_slot, server.get_event_sender());
+    let server = A2aServer::new(StreamingAgent).bind("127.0.0.1:3000")?;
 
     println!("Starting A2A Streaming Agent on http://127.0.0.1:3000");
     println!("Agent card:  http://127.0.0.1:3000/.well-known/agent-card.json");

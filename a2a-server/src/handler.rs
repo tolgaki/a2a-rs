@@ -3,9 +3,12 @@
 //! This module defines the core abstraction for implementing A2A agent backends.
 //! Implement the `MessageHandler` trait to create your own agent backend.
 
-use a2a_rs_core::{AgentCard, Message, SendMessageResponse, Task};
+use a2a_rs_core::{AgentCard, Message, SendMessageResponse, StreamResponse, Task};
 use async_trait::async_trait;
 use std::sync::Arc;
+use tokio::sync::broadcast;
+
+use crate::task_store::TaskStore;
 
 /// Result type for handler operations
 pub type HandlerResult<T> = Result<T, HandlerError>;
@@ -77,17 +80,51 @@ pub struct AuthContext {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// Context passed to `handle_message_with_context`, giving the handler
+/// access to server-owned state.
+#[derive(Clone)]
+pub struct HandlerContext {
+    /// Broadcast channel for emitting streaming events (status updates, artifact chunks, etc.).
+    pub event_tx: broadcast::Sender<StreamResponse>,
+    /// Server's task store, for reading or mutating tasks outside of the normal request/response flow.
+    pub task_store: TaskStore,
+}
+
 /// Trait for implementing A2A message handlers
 ///
 /// Returns `SendMessageResponse` which can be either a Task or a direct Message.
+///
+/// Implementors should only implement [`MessageHandler::handle_message_with_context`].
+///
+/// [`MessageHandler::handle_message`] is kept for backwards compatibility.
+/// The server always invokes the context variant and its default implementation forwards to `handle_message`.
 #[async_trait]
 pub trait MessageHandler: Send + Sync {
-    /// Process an incoming A2A message and return a Task or Message
+    /// Process an incoming A2A message and return a Task or Message.
+    ///
+    /// Handlers must override either this method or [`MessageHandler::handle_message_with_context`].
     async fn handle_message(
+        &self,
+        _message: Message,
+        _auth: Option<AuthContext>,
+    ) -> HandlerResult<SendMessageResponse> {
+        Err(HandlerError::Internal(anyhow::anyhow!(
+            "MessageHandler must implement handle_message or handle_message_with_context"
+        )))
+    }
+
+    /// Process an incoming A2A message with access to server-owned state.
+    ///
+    /// The default forwards to [`MessageHandler::handle_message`] for backwards compatibilty.
+    /// New implementations should implement this method.
+    async fn handle_message_with_context(
         &self,
         message: Message,
         auth: Option<AuthContext>,
-    ) -> HandlerResult<SendMessageResponse>;
+        _ctx: &HandlerContext,
+    ) -> HandlerResult<SendMessageResponse> {
+        self.handle_message(message, auth).await
+    }
 
     /// Return the agent card for this handler
     fn agent_card(&self, base_url: &str) -> AgentCard;
