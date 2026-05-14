@@ -1404,10 +1404,20 @@ async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Respo
         }
     };
 
+    // Subscribe BEFORE taking the snapshot so events emitted between the
+    // store read and the subscription are not lost. The new
+    // [subscribe, snapshot] window can deliver a duplicate (an update
+    // appearing both in the snapshot and on `rx`), but A2A updates are
+    // idempotent state edits — applying the same StatusUpdate or
+    // ArtifactUpdate (keyed by artifact_id) twice yields the same end
+    // state. Idempotent duplicate vs. silent loss is the right trade.
+    let mut rx = state.subscribe_events();
+
     // Verify the task exists
     let task = match state.task_store.get_flexible(&params.id).await {
         Some(t) => t,
         None => {
+            drop(rx);
             return sse_error_response(error(
                 req_id,
                 errors::TASK_NOT_FOUND,
@@ -1417,9 +1427,10 @@ async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Respo
         }
     };
 
-    // Reject subscriptions to terminal tasks (STREAM-SUB-003): the spec
-    // says SubscribeToTask on a terminal task MUST return an error.
+    // Re-check terminal AFTER the snapshot (STREAM-SUB-003): the task may
+    // have transitioned to a terminal state between subscribe and snapshot.
     if task.status.state.is_terminal() {
+        drop(rx);
         return sse_error_response(error(
             req_id,
             errors::UNSUPPORTED_OPERATION,
@@ -1429,7 +1440,6 @@ async fn handle_tasks_resubscribe(state: AppState, req: JsonRpcRequest) -> Respo
     }
 
     let target_task_id = task.id.clone();
-    let mut rx = state.subscribe_events();
     let task_store = state.task_store.clone();
 
     let wrap = move |value: serde_json::Value| -> String {
